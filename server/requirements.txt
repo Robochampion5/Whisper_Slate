@@ -17,3 +17,8 @@ sentence-transformers
 faster-whisper
 # python-multipart: required by FastAPI to parse multipart/form-data (UploadFile + Form fields).
 python-multipart
+# better-profanity: lightweight (pure-Python, keyword/pattern list), MIT licence, no model download.
+# Used for the fast local appropriateness first-pass described in Project_spec.md §13.3.
+# A small classifier can be layered on later for higher toxicity recall; this handles
+# obvious cases with zero infrastructure cost.
+better-profanity
