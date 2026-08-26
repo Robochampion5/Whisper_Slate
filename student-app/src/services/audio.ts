@@ -1,6 +1,10 @@
 let mediaRecorder: MediaRecorder | null = null;
 let audioChunks: Blob[] = [];
 
+/**
+ * Starts audio capture from the device microphone via MediaRecorder.
+ * The raw audio is buffered in 250 ms chunks.
+ */
 export async function startAudioCapture(): Promise<void> {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -15,63 +19,41 @@ export async function startAudioCapture(): Promise<void> {
 
     mediaRecorder.start(250);
   } catch (err) {
-    console.error("Microphone access denied or error:", err);
+    console.error('Microphone access denied or error:', err);
     throw err;
   }
 }
 
-export async function stopAudioCapture(): Promise<Float32Array> {
+/**
+ * Stops audio capture and resolves with the raw audio Blob (audio/webm;codecs=opus
+ * or the browser's preferred MediaRecorder MIME type).
+ *
+ * NOTE (v2 architecture): we no longer resample to 16 kHz Float32Array here.
+ * The Blob is POSTed directly to the server, where faster-whisper handles
+ * decoding and transcription.  This removes the need for OfflineAudioContext
+ * resampling and the @huggingface/transformers dependency entirely.
+ */
+export async function stopAudioCapture(): Promise<Blob> {
   return new Promise((resolve, reject) => {
     if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-      return reject(new Error("No recording in progress"));
+      return reject(new Error('No recording in progress'));
     }
 
-    mediaRecorder.onstop = async () => {
-      const blob = new Blob(audioChunks, { type: 'audio/webm' }); 
-      
-      // Cleanup tracks to release microphone indicator
-      mediaRecorder?.stream.getTracks().forEach(track => track.stop());
+    mediaRecorder.onstop = () => {
+      // Prefer opus inside webm (widely supported, efficient for voice).
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+
+      const blob = new Blob(audioChunks, { type: mimeType });
+
+      // Release the microphone indicator
+      mediaRecorder?.stream.getTracks().forEach((track) => track.stop());
       mediaRecorder = null;
 
-      try {
-        const audioData = await resampleAudio(blob, 16000);
-        resolve(audioData);
-      } catch (err) {
-        reject(err);
-      }
+      resolve(blob);
     };
 
     mediaRecorder.stop();
   });
-}
-
-/**
- * Resamples the audio blob to the given sample rate and returns a Float32Array of PCM data.
- * Whisper requires 16kHz mono audio.
- */
-async function resampleAudio(blob: Blob, targetSampleRate: number): Promise<Float32Array> {
-  const arrayBuffer = await blob.arrayBuffer();
-  
-  // Use OfflineAudioContext or AudioContext to decode and resample
-  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-    sampleRate: targetSampleRate
-  });
-  
-  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-  
-  const numberOfChannels = audioBuffer.numberOfChannels;
-  const length = audioBuffer.length;
-  
-  // getChannelData returns a Float32Array
-  const pcmData = audioBuffer.getChannelData(0); 
-  
-  // Mix channels to mono if stereo
-  if (numberOfChannels > 1) {
-    const rightChannel = audioBuffer.getChannelData(1);
-    for (let i = 0; i < length; i++) {
-      pcmData[i] = (pcmData[i] + rightChannel[i]) / 2;
-    }
-  }
-
-  return pcmData;
 }

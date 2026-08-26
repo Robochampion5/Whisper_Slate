@@ -5,4 +5,15 @@ websockets
 pydantic
 scikit-learn
 numpy
+# sentence-transformers: open-source, runs all-MiniLM-L6-v2 locally on CPU — no cloud API needed.
+# Chosen because it is the same model family as the original client-side design (Xenova/all-MiniLM-L6-v2),
+# ensuring embedding-space compatibility, and it handles classroom-scale volume (tens of doubts/session)
+# comfortably on CPU.
 sentence-transformers
+# faster-whisper: open-source CTranslate2-based Whisper runtime — significantly faster than openai-whisper
+# on CPU thanks to int8 quantisation, no cloud API, and handles short (5–15 s) audio clips in a few
+# seconds on a laptop CPU.  Chosen to replace the browser-side @huggingface/transformers Whisper
+# pipeline from the original Phase 2/3 design (see Project_spec.md §13.1).
+faster-whisper
+# python-multipart: required by FastAPI to parse multipart/form-data (UploadFile + Form fields).
+python-multipart

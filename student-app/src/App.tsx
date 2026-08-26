@@ -1,94 +1,86 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useCallback } from 'react'
 import ConnectionBadge from './components/ConnectionBadge'
 import LoginScreen from './components/LoginScreen'
-import DownloadScreen from './components/DownloadScreen'
 import CaptureScreen from './components/CaptureScreen'
-import ProcessingScreen from './components/ProcessingScreen'
-import ReviewScreen from './components/ReviewScreen'
-import ConfirmationScreen from './components/ConfirmationScreen'
+import UploadingScreen from './components/UploadingScreen'
+import AwaitingReviewScreen, { type ReviewDecision } from './components/AwaitingReviewScreen'
+import OutcomeScreen from './components/ConfirmationScreen'
 
-type AppState = 'LOGIN' | 'DOWNLOAD' | 'CAPTURE' | 'PROCESSING' | 'REVIEW' | 'CONFIRMATION'
+// ---------------------------------------------------------------------------
+// State machine (v2 architecture — §13.4):
+//
+//   LOGIN → CAPTURE → UPLOADING → AWAITING_REVIEW → ACCEPTED | REJECTED
+//                ↑______________________↑______________________↑
+//
+// The old DOWNLOAD state (model warm-up), PROCESSING state (on-device Whisper),
+// and REVIEW state (transcript edit) have been removed.  The AI pipeline now
+// runs on the server after a fast multipart upload.
+// ---------------------------------------------------------------------------
+type AppState = 'LOGIN' | 'CAPTURE' | 'UPLOADING' | 'AWAITING_REVIEW' | 'OUTCOME'
 
 function App() {
   const [appState, setAppState] = useState<AppState>('LOGIN')
-  
-  // Shared state across the flow
-  const [audioData, setAudioData] = useState<Float32Array | undefined>()
-  const [transcribedText, setTranscribedText] = useState('')
-  const [embedding, setEmbedding] = useState<number[]>([])
-  const [sessionCode, setSessionCode] = useState<string>('')
-  const [deviceToken, setDeviceToken] = useState<string>('')
-  const worker = useRef<Worker | null>(null);
-  const [downloadProgress, setDownloadProgress] = useState(0);
-  const [downloadStatus, setDownloadStatus] = useState('Initializing model...');
 
-  useEffect(() => {
-    // Create worker
-    worker.current = new Worker(new URL('./services/worker.ts', import.meta.url), {
-      type: 'module'
-    });
+  // Credentials set at login
+  const [sessionCode, setSessionCode] = useState('')
+  const [deviceToken, setDeviceToken] = useState('')
 
-    const onMessage = (e: MessageEvent) => {
-      const msg = e.data;
-      if (msg.type === 'progress') {
-        if (msg.data.status === 'progress') {
-          setDownloadProgress(msg.data.progress || 0);
-          setDownloadStatus(`Downloading: ${msg.data.file}`);
-        } else if (msg.data.status === 'init') {
-          setDownloadStatus(`Initializing: ${msg.data.file}`);
-        } else if (msg.data.status === 'ready') {
-          setDownloadStatus(`Loaded: ${msg.data.file}`);
-        }
-      } else if (msg.type === 'ready') {
-        // When fully ready, and we are on the DOWNLOAD screen, transition to CAPTURE
-        setAppState(prev => prev === 'DOWNLOAD' ? 'CAPTURE' : prev);
-      } else if (msg.type === 'error') {
-        console.error("Worker error:", msg.error);
-        setDownloadStatus(`Error loading model: ${msg.error}`);
-      }
-    };
-    
-    worker.current.addEventListener('message', onMessage);
+  // Set when the user finishes recording
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null)
 
-    return () => {
-      worker.current?.removeEventListener('message', onMessage);
-      worker.current?.terminate();
-    };
-  }, []);
+  // Set when the server responds to /doubts/audio
+  const [doubtId, setDoubtId] = useState('')
+
+  // Set when the teacher makes a decision
+  const [reviewDecision, setReviewDecision] = useState<ReviewDecision | null>(null)
+
+  // -------------------------------------------------------------------------
+  // Transition handlers
+  // -------------------------------------------------------------------------
 
   const handleLoginSuccess = (code: string, token: string) => {
-    setSessionCode(code);
-    setDeviceToken(token);
-    setAppState('DOWNLOAD')
-    worker.current?.postMessage({ type: 'load' });
+    setSessionCode(code)
+    setDeviceToken(token)
+    setAppState('CAPTURE')
   }
-  
-  const handleRecordingComplete = (audio?: Float32Array) => {
-    if (!audio) {
-      setAppState('CAPTURE');
-      return;
+
+  const handleRecordingComplete = (blob?: Blob) => {
+    if (!blob) {
+      // Recording was discarded or errored
+      setAppState('CAPTURE')
+      return
     }
-    setAudioData(audio)
-    setAppState('PROCESSING')
+    setAudioBlob(blob)
+    setAppState('UPLOADING')
   }
 
-  const handleTranscriptionComplete = (text: string, emb: number[]) => {
-    setTranscribedText(text)
-    setEmbedding(emb)
-    setAppState('REVIEW')
+  const handleUploaded = useCallback((id: string) => {
+    setDoubtId(id)
+    setAppState('AWAITING_REVIEW')
+  }, [])
+
+  const handleUploadError = useCallback((err: string) => {
+    console.error('Upload error:', err)
+    alert('Failed to send your doubt: ' + err)
+    setAppState('CAPTURE')
+  }, [])
+
+  const handleDecision = useCallback((decision: ReviewDecision) => {
+    setReviewDecision(decision)
+    setAppState('OUTCOME')
+  }, [])
+
+  const handleOutcomeComplete = () => {
+    // Reset per-doubt state and return to capture
+    setAudioBlob(null)
+    setDoubtId('')
+    setReviewDecision(null)
+    setAppState('CAPTURE')
   }
 
-  const handleTranscriptionError = (err: string) => {
-    console.error("Transcription error:", err);
-    alert("Transcription failed: " + err);
-    setAppState('CAPTURE');
-  }
-
-  const handleReviewSent = () => setAppState('CONFIRMATION')
-  const handleReviewDiscard = () => setAppState('CAPTURE')
-  
-  const handleConfirmationComplete = () => setAppState('CAPTURE')
-
+  // -------------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------------
   return (
     <main className="relative min-h-screen bg-teal-950 selection:bg-emerald-500/30 text-teal-50">
       {appState !== 'LOGIN' && <ConnectionBadge />}
@@ -97,36 +89,32 @@ function App() {
         <LoginScreen onSuccess={handleLoginSuccess} />
       )}
 
-      {appState === 'DOWNLOAD' && (
-        <DownloadScreen progress={downloadProgress} status={downloadStatus} />
-      )}
-      
       {appState === 'CAPTURE' && (
         <CaptureScreen onRecordingComplete={handleRecordingComplete} />
       )}
-      
-      {appState === 'PROCESSING' && (
-        <ProcessingScreen 
-          audioData={audioData}
-          worker={worker.current}
-          onTranscriptionComplete={handleTranscriptionComplete} 
-          onError={handleTranscriptionError}
-        />
-      )}
-      
-      {appState === 'REVIEW' && (
-        <ReviewScreen 
-          initialText={transcribedText}
-          embedding={embedding}
+
+      {appState === 'UPLOADING' && audioBlob && (
+        <UploadingScreen
+          audioBlob={audioBlob}
           sessionCode={sessionCode}
           deviceToken={deviceToken}
-          onSent={handleReviewSent} 
-          onDiscard={handleReviewDiscard} 
+          onUploaded={handleUploaded}
+          onError={handleUploadError}
         />
       )}
-      
-      {appState === 'CONFIRMATION' && (
-        <ConfirmationScreen onComplete={handleConfirmationComplete} />
+
+      {appState === 'AWAITING_REVIEW' && (
+        <AwaitingReviewScreen
+          doubtId={doubtId}
+          onDecision={handleDecision}
+        />
+      )}
+
+      {appState === 'OUTCOME' && reviewDecision && (
+        <OutcomeScreen
+          decision={reviewDecision}
+          onComplete={handleOutcomeComplete}
+        />
       )}
     </main>
   )

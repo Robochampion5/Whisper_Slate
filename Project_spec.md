@@ -126,7 +126,7 @@ Both models run inside the browser on the student's own phone, via `@huggingface
 - **No install friction:** Fully functional as an installable PWA; works after first load even with spotty/no internet (WiFi-off local mode once models are cached and connected to the classroom LAN).
 
 ### 9.2 Teacher Interface (Green Light — Dashboard on laptop)
-- **Session screen:** Start/stop a live class session; QR code or class code for students to join the local network/app.
+- **Session screen:** Start/stop a live class session; QR code or class code for students to join the local network/app. *(As of section 14, this screen also supports uploading the lecture's slides to seed topic-relevance context — see section 14.)*
 - **Live doubt-cluster dashboard:** Ranked list/cards of doubt clusters, each showing:
   - Representative phrase(s) for the cluster (paraphrased/aggregated, anonymous).
   - Count of doubts in the cluster.
@@ -164,3 +164,89 @@ Both models run inside the browser on the student's own phone, via `@huggingface
 ## 12. Guiding Principle
 
 > The goal isn't more data — it's turning silence into a signal teachers can act on, mid-lecture.
+
+---
+
+## 13. Architecture Update — v2 (Server-Side AI, Moderation & Reply Loop)
+
+**Status: current.** This section supersedes the on-device/client-side AI description in sections 4, 5, and 9.1 above. Sections 1–12 remain accurate for the product's *purpose and UX intent*; where they describe *where the AI runs*, this section is the source of truth. This update was introduced starting at Phase 6 of the implementation plan.
+
+### 13.1 What changed and why
+
+The original design ran Whisper and the MiniLM embedding model **inside the student's phone browser** via `@huggingface/transformers` / ONNX Runtime Web, so no audio or text ever had to leave the device to be processed. That was driven by a phone-first hackathon constraint that no longer applies to this project.
+
+With that constraint gone, running two ML models (tens to hundreds of MB) inside every student's mobile browser is unnecessary complexity: it makes first load slow, adds browser-compatibility risk (WebGPU/WASM support varies), and is harder for a visitor to a GitHub repo to spin up and try. Since the project already runs a local FastAPI server that every device talks to anyway, **it makes more sense to run the AI once, server-side**, and keep the phone's job simple: record audio, upload it, show status.
+
+### 13.2 Updated data flow
+
+1. **Record** — student holds the push-to-talk button in `student-app`; audio is captured client-side (MediaRecorder), nothing else happens on-device.
+2. **Upload** — the raw audio is POSTed to the local FastAPI server (`/doubts/audio`) along with the session code and an opaque device token. The server responds immediately with a doubt ID and a `processing` status — the upload does not block on transcription.
+3. **Transcribe** — the server runs the audio through a local, open-source Whisper model (`faster-whisper`, tiny/base) to produce a transcript, then **discards the audio file** — raw audio is never stored at rest, preserving the product's original privacy commitment even though the processing step itself moved server-side.
+4. **Embed** — the server embeds the transcript with `sentence-transformers` (`all-MiniLM-L6-v2`), the same model family as the original design, just running server-side instead of in-browser.
+5. **Screen** — the server automatically checks the doubt for (a) an **appropriateness** signal (lightweight profanity/toxicity screening) and (b) a **topic-relevance** signal (cosine similarity against topic keywords the teacher entered when starting the session). Both are surfaced as flags/scores — neither auto-rejects anything.
+6. **Review** — the doubt lands in the teacher's **moderation queue** with status `pending_review`, showing the transcript and both flags. The teacher **accepts** or **rejects** it, optionally attaching a reply message, and — for rejections — optionally attaching a **penalty duration**.
+7. **Cluster** — only **accepted** doubts feed the ranked "what to re-teach" cluster view from section 9.2; pending doubts are tracked separately as a backlog counter so they don't pollute the ranking.
+8. **Reply** — the review decision (accepted/rejected, reply text, penalty info) is pushed in real time to the *specific device* that submitted the doubt, over a per-device channel that is never exposed to any other student or broadcast on the anonymous dashboard channel.
+
+### 13.3 Moderation model
+
+- **Session topics:** when starting a session, the teacher can enter a short free-text list of lecture topics/keywords. These are embedded once and used as the topic-relevance reference for every doubt in that session.
+- **Appropriateness screening:** automated, local, open-source (no cloud moderation API) — a fast first pass (profanity/keyword-based) is sufficient; a small local classifier can be layered in for better recall. This is always advisory — a human (the teacher) makes the final call.
+- **Topic-relevance screening:** cosine similarity between a doubt's embedding and the session's topic embedding(s), against a documented, tunable threshold. Also advisory only.
+- **Teacher decision, every time:** accept or reject, with an optional reply message either way, and — only on reject — an optional penalty duration chosen from a short preset list (e.g. none / 1 min / 5 min / 15 min / rest of session) or a custom value.
+- **Penalty enforcement:** penalties are tracked server-side, keyed to the device's opaque token (never to a name or other identity), and enforced on that device's future doubt submissions and session rejoins — the client shows a countdown for UX, but the server is the source of truth.
+
+### 13.4 What a student now sees
+
+The state machine from section 9.1 gains two new terminal states after "Send":
+- **Awaiting review** — the doubt has been uploaded and transcribed but not yet reviewed.
+- **Accepted** — shown with any reply message the teacher attached, then the app returns to the capture screen.
+- **Rejected** — shown with the reason, any reply message, and, if a penalty was applied, a live countdown during which the push-to-talk button is disabled.
+
+This is a deliberate change from the original "send and forget" flow in section 9.1: students now get closed-loop feedback on every doubt they submit, which is part of what makes this a stronger, more complete product.
+
+### 13.5 What stays the same
+
+- The **anonymity model** from section 7 is unchanged in spirit: classmates and the teacher's normal dashboard view never see who submitted a doubt. The per-device reply channel routes by opaque device token, not identity, so it doesn't reintroduce identity into the anonymous surfaces.
+- The **clustering approach** (agglomerative clustering, tuned for small noisy sets, ranked by count + recency) from sections 4 and 8 is unchanged — it now simply runs on server-computed embeddings instead of client-supplied ones, and filters to accepted doubts only.
+- The **local-network-only** posture from section 6 is unchanged — the server still only needs to be reachable on the classroom's local network; moving AI server-side doesn't require any external/cloud connectivity, since `faster-whisper` and `sentence-transformers` both run fully locally on the server machine.
+
+---
+
+## 14. Feature Addition — Slide-Based Topic Context
+
+**Status: current.** This section extends section 13.3's "session topics" mechanism. It does not replace typed topic keywords — it adds a richer, optional second source that can be used instead of or alongside them.
+
+### 14.1 Motivation
+
+Section 13.3 lets a teacher type a short list of topic keywords when starting a session, used as the reference point for topic-relevance scoring. That works but is a weak signal — a lecture actually covers far more nuance than 5-10 typed keywords capture, and typing them out is friction the teacher may skip under time pressure. Since the teacher already has lecture slides prepared, letting them **upload the slide deck directly** gives a much richer, more accurate, and lower-effort topic reference.
+
+### 14.2 Extraction approach — local-first, with an optional pluggable enrichment hook
+
+Consistent with the rest of this project's local-first posture (section 13.1's move to local, open-source AI), slide text extraction runs **entirely locally by default, with no external API required**:
+
+| Slide format | Extraction method |
+|---|---|
+| PDF | `PyMuPDF` (`fitz`) — per-page text extraction |
+| PPTX | `python-pptx` — text from shapes/text frames, plus speaker notes |
+| Scanned/image-heavy pages (either format) | Optional local OCR via `pytesseract`, only if a page's directly-extracted text falls below a small character threshold; feature-flagged since it requires a system-level Tesseract install |
+
+**Optional pluggable enrichment (off by default):** if the operator configures an external LLM provider (via an env var + API key), the raw extracted text can be passed through a summarization/keyword-extraction call to produce cleaner topic phrases, stored *alongside* (not replacing) the raw local extraction. If no provider is configured — the default — the app uses the raw local extraction only and is fully functional with **zero API keys**. This keeps the "clone and run" story intact for anyone trying the project from GitHub, while leaving a door open for teams that want a sharper enrichment step.
+
+### 14.3 Updated data flow
+
+1. **Upload** — from the session screen (section 9.2), the teacher uploads a PDF or PPTX of the lecture slides.
+2. **Extract** — the server extracts one text chunk per slide/page (falling back to OCR per-page if configured and needed).
+3. **Embed** — each non-empty chunk is embedded with the same `sentence-transformers` model already used elsewhere in the pipeline (section 13.2 step 4) — no new model is introduced.
+4. **Review** — the teacher sees a quick list of the extracted chunks (short preview text per slide) and can exclude a few (e.g. a title slide, a "Thank You / Questions?" slide) that would otherwise dilute the relevance signal with noise. Typed topic keywords from section 13.3 remain available in the same review step and combine with the slide-derived chunks.
+5. **Confirm** — once confirmed, all included chunks (slide-derived + typed) become the session's **topic reference set** — a *list* of reference embeddings, not a single blended vector.
+
+### 14.4 Updated relevance scoring
+
+Section 13.3's relevance score was originally a single cosine similarity against one topic embedding. With a reference *set* instead of a single vector, the relevance score for a doubt is computed as the **maximum similarity across the whole reference set** (or a top-k average, whichever proves more robust in testing) — not an average across all chunks, since averaging a 20-slide deck into one blurry vector would wash out genuinely on-topic doubts that only relate to one or two slides. This is documented as a tunable choice in the implementation, same as the original relevance threshold.
+
+### 14.5 What stays the same
+
+- Relevance and appropriateness flags remain **advisory only** — the teacher still makes every accept/reject decision (section 13.3).
+- No slide content, extracted text, or embeddings ever leave the local server — same local-network-only posture as the rest of the system (section 6, section 13.5).
+- Corrupt, password-protected, unsupported-format, or oversized uploads are rejected with a clear error rather than failing silently.

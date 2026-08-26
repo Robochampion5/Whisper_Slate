@@ -1,15 +1,14 @@
 import { useState, useRef } from 'react';
 import { Mic } from 'lucide-react';
-
 import { startAudioCapture, stopAudioCapture } from '../services/audio';
 
 type CaptureProps = {
-  onRecordingComplete: (audioData?: Float32Array) => void;
+  onRecordingComplete: (audioBlob?: Blob) => void;
 };
 
 export default function CaptureScreen({ onRecordingComplete }: CaptureProps) {
   const [isRecording, setIsRecording] = useState(false);
-  // Using a simple ref to track long-press vs click to avoid firing twice
+  // Guard ref to avoid firing both pointer and click handlers simultaneously
   const isHandlingRef = useRef(false);
 
   const startRecording = async () => {
@@ -17,9 +16,8 @@ export default function CaptureScreen({ onRecordingComplete }: CaptureProps) {
     try {
       await startAudioCapture();
       setIsRecording(true);
-    } catch (err) {
-      console.error(err);
-      alert("Microphone access is required to use Whisper Slate.");
+    } catch {
+      alert('Microphone access is required to use Whisper Slate.');
     }
   };
 
@@ -27,11 +25,11 @@ export default function CaptureScreen({ onRecordingComplete }: CaptureProps) {
     if (!isRecording) return;
     setIsRecording(false);
     try {
-      const audioData = await stopAudioCapture();
-      onRecordingComplete(audioData);
+      const blob = await stopAudioCapture();
+      onRecordingComplete(blob);
     } catch (err) {
-      console.error("Error stopping capture", err);
-      onRecordingComplete(); // Proceed to error state or discard
+      console.error('Error stopping capture', err);
+      onRecordingComplete(); // discard
     }
   };
 
@@ -49,7 +47,7 @@ export default function CaptureScreen({ onRecordingComplete }: CaptureProps) {
     }
   };
 
-  // Fallback for click if pointer events don't catch (e.g. accessibility tap)
+  // Accessibility fallback (tap/click)
   const handleClick = () => {
     if (!isHandlingRef.current) {
       if (isRecording) {
@@ -68,16 +66,15 @@ export default function CaptureScreen({ onRecordingComplete }: CaptureProps) {
           <p className="text-teal-300/70 text-sm">Hold to whisper</p>
         </div>
 
-        {/* Hero Button Container */}
+        {/* Hero Button */}
         <div className="relative flex items-center justify-center">
-          {/* Pulsing rings when recording */}
           {isRecording && (
             <>
-              <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping scale-150 duration-1000"></div>
-              <div className="absolute inset-0 bg-emerald-500/30 rounded-full animate-pulse scale-125 duration-700"></div>
+              <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping scale-150 duration-1000" />
+              <div className="absolute inset-0 bg-emerald-500/30 rounded-full animate-pulse scale-125 duration-700" />
             </>
           )}
-          
+
           <button
             onPointerDown={handlePointerDown}
             onPointerUp={handlePointerUp}
@@ -86,20 +83,20 @@ export default function CaptureScreen({ onRecordingComplete }: CaptureProps) {
             className={`
               relative z-10 flex items-center justify-center
               w-40 h-40 rounded-full shadow-2xl transition-all duration-300
-              ${isRecording 
-                ? 'bg-emerald-500 scale-95 shadow-emerald-900/50' 
+              ${isRecording
+                ? 'bg-emerald-500 scale-95 shadow-emerald-900/50'
                 : 'bg-teal-800 hover:bg-teal-700 hover:scale-105 shadow-black/40'}
             `}
-            aria-label={isRecording ? "Release to stop recording" : "Hold to record"}
+            aria-label={isRecording ? 'Release to stop recording' : 'Hold to record'}
           >
             <Mic className={`w-16 h-16 ${isRecording ? 'text-white' : 'text-teal-300'}`} />
           </button>
         </div>
       </div>
-      
+
       <div className="pb-10 text-center">
         <p className="text-xs text-teal-600 font-medium tracking-wide uppercase">
-          Private & Anonymous
+          Private &amp; Anonymous
         </p>
       </div>
     </div>

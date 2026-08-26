@@ -31,24 +31,12 @@ export default defineConfig({
         ]
       },
       workbox: {
-        maximumFileSizeToCacheInBytes: 30 * 1024 * 1024, // 30 MB to allow transformers.js WASM
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,wasm}'],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/huggingface\.co\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'huggingface-models',
-              expiration: {
-                maxEntries: 50,
-                maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
-              },
-              cacheableResponse: {
-                statuses: [0, 200]
-              }
-            }
-          }
-        ]
+        // v2 architecture: @huggingface/transformers and its WASM model weights
+        // (~100–200 MB) have been removed from the client.  The app now only
+        // caches its own JS/CSS/HTML assets, so the default 5 MB limit is fine.
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        // No runtime cache for huggingface.co — models run server-side now.
       }
     })
   ],

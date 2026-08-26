@@ -1,32 +1,47 @@
-# React + TypeScript + Vite
+# Whisper Slate — Student App
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + Vite + TypeScript PWA. Runs on students' phones during a live lecture.
 
-Currently, two official plugins are available:
+## What it does
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. **Login** — student enters the class code to join the session.
+2. **Capture** — push-to-hold mic button; audio is recorded via `MediaRecorder` (webm/opus).
+3. **Upload** — on release, the raw audio `Blob` is POSTed to `POST /doubts/audio` on the local server.
+4. **Awaiting review** — a per-device WebSocket (`/ws/device/{doubtId}`) keeps the student updated while the teacher reviews the doubt.
+5. **Outcome** — shows the teacher's decision:
+   - ✅ **Accepted** — green checkmark + optional teacher reply, then back to capture.
+   - ❌ **Rejected** — reason + optional reply + live penalty countdown (recording disabled during penalty).
 
-## React Compiler
+No AI model runs in the browser. No model download on first load.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## State machine
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```
+LOGIN → CAPTURE → UPLOADING → AWAITING_REVIEW → OUTCOME
+                                                    ↓
+                                              (back to CAPTURE)
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## Dev
+
+```bash
+npm install
+npm run dev        # http://localhost:5173
+```
+
+Set `VITE_API_URL` to point at the server if it's not on `localhost:8000`:
+
+```bash
+VITE_API_URL=http://192.168.1.5:8000 npm run dev
+```
+
+## Key files
+
+| File | Purpose |
+|---|---|
+| `src/services/audio.ts` | `MediaRecorder` capture → raw `Blob` |
+| `src/services/api.ts` | `uploadAudio()` multipart POST, `deviceChannelUrl()` |
+| `src/components/UploadingScreen.tsx` | Network upload indicator |
+| `src/components/AwaitingReviewScreen.tsx` | Per-device WS, "with your teacher" state |
+| `src/components/ConfirmationScreen.tsx` | Accepted / Rejected outcome + penalty countdown |
+| `src/App.tsx` | State machine |
