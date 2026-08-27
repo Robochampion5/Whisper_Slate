@@ -21,13 +21,27 @@ type OutcomeProps = {
  *     button is disabled until the penalty expires.
  *     (The server is the source of truth for penalty enforcement — the
  *     countdown here is purely for UX feedback, §13.3.)
+ *
+ * Penalty timing: if the server provided a penaltyExpiresAt ISO timestamp,
+ * remaining time is derived from the wall clock (more accurate than relying
+ * on the penaltySeconds integer which may drift during network delivery).
  */
 export default function OutcomeScreen({ decision, onComplete }: OutcomeProps) {
   const isAccepted = decision.status === 'accepted';
   const hasReply = Boolean(decision.replyMessage);
-  const penaltySeconds = decision.penaltySeconds ?? 0;
 
-  const [remaining, setRemaining] = useState(penaltySeconds);
+  // Derive initial remaining from wall-clock if penaltyExpiresAt is available
+  const initialRemaining = (() => {
+    if (decision.penaltyExpiresAt) {
+      return Math.max(
+        0,
+        Math.round((new Date(decision.penaltyExpiresAt).getTime() - Date.now()) / 1000),
+      );
+    }
+    return decision.penaltySeconds ?? 0;
+  })();
+
+  const [remaining, setRemaining] = useState(initialRemaining);
 
   // Penalty countdown
   useEffect(() => {
@@ -42,7 +56,7 @@ export default function OutcomeScreen({ decision, onComplete }: OutcomeProps) {
       });
     }, 1000);
     return () => clearInterval(id);
-  }, []);  // run once on mount — `remaining` initial value is from penaltySeconds
+  }, []); // run once on mount — initial value from penaltyExpiresAt/penaltySeconds
 
   // Auto-return for accepted doubts with no reply
   useEffect(() => {

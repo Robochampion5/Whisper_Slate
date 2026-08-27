@@ -12,26 +12,55 @@ export async function pingServer(): Promise<boolean> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Penalty response shape — returned as the 403 detail on penalised requests
+// ---------------------------------------------------------------------------
+
+export interface PenaltyError {
+  error: 'penalized';
+  remainingSeconds: number;
+}
+
+function isPenaltyDetail(body: unknown): body is PenaltyError {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    (body as PenaltyError).error === 'penalized'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Session join
+// ---------------------------------------------------------------------------
+
 export async function joinSession(classCode: string): Promise<string> {
   const res = await fetch(`${SERVER_URL}/session/join`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ classCode }),
   });
+
+  if (res.status === 403) {
+    // Penalised device attempting to rejoin — surface as a structured error
+    const body = await res.json().catch(() => null);
+    if (isPenaltyDetail(body)) throw Object.assign(new Error('penalized'), body);
+  }
+
   if (!res.ok) throw new Error('Failed to join session');
   const data = await res.json();
   return data.device_token;
 }
 
+// ---------------------------------------------------------------------------
+// Audio upload
+// ---------------------------------------------------------------------------
+
 /**
  * POSTs the raw audio Blob to POST /doubts/audio as multipart/form-data.
  *
- * The server responds immediately (before transcription finishes) with:
- *   { doubtId: string, status: "processing" }
+ * Returns { doubtId, status: "processing" } on success.
  *
- * The caller should then open the per-device WebSocket
- *   ws://<server>/ws/device/<doubtId>
- * and wait for a PROCESSING_COMPLETE or REVIEW_DECISION event.
+ * Throws a PenaltyError-shaped Error if the server returns 403 penalized.
  */
 export async function uploadAudio(
   audioBlob: Blob,
@@ -39,7 +68,6 @@ export async function uploadAudio(
   deviceToken: string,
 ): Promise<{ doubtId: string; status: string }> {
   const form = new FormData();
-  // filename extension helps server choose the right temp file suffix
   const ext = audioBlob.type.includes('webm') ? '.webm' : '.wav';
   form.append('audio', audioBlob, `doubt${ext}`);
   form.append('sessionCode', sessionCode);
@@ -48,8 +76,13 @@ export async function uploadAudio(
   const res = await fetch(`${SERVER_URL}/doubts/audio`, {
     method: 'POST',
     body: form,
-    // Do NOT set Content-Type header — browser sets it with the correct boundary
   });
+
+  if (res.status === 403) {
+    const body = await res.json().catch(() => null);
+    if (isPenaltyDetail(body)) throw Object.assign(new Error('penalized'), body);
+    throw new Error('Forbidden');
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
@@ -59,11 +92,64 @@ export async function uploadAudio(
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// WebSocket URLs
+// ---------------------------------------------------------------------------
+
 /**
- * Returns the WebSocket URL for the per-device review channel.
- * The student app connects here after upload to receive the teacher's decision.
+ * Per-doubt channel — used by AwaitingReviewScreen for immediate response.
+ * Keyed by the server-generated opaque doubtId.
  */
 export function deviceChannelUrl(doubtId: string): string {
   const base = SERVER_URL.replace(/^http/, 'ws');
   return `${base}/ws/device/${doubtId}`;
+}
+
+/**
+ * Standing per-device channel — maintained for the whole session.
+ * The student app connects here after join() and receives REVIEW_DECISION
+ * events even after the doubt-scoped channel has closed.
+ * Keyed by the raw deviceToken (hashed server-side).
+ */
+export function studentChannelUrl(deviceToken: string): string {
+  const base = SERVER_URL.replace(/^http/, 'ws');
+  return `${base}/ws/student/${encodeURIComponent(deviceToken)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Reconnect / resync fallback
+// ---------------------------------------------------------------------------
+
+export interface MyDoubtsResponse {
+  latestDoubt: {
+    id: number;
+    status: 'processing' | 'pending_review' | 'accepted' | 'rejected';
+    reviewReason: string | null;
+    penaltySeconds: number;
+    penaltyExpiresAt: string | null;
+  } | null;
+  activePenalty: {
+    remainingSeconds: number;
+    expiresAt: string;
+  } | null;
+}
+
+/**
+ * Called on app load when a stored deviceToken exists, to recover the state
+ * of any outstanding doubt and any active penalty (§13.4 step 6 plan).
+ */
+export async function getMyDoubts(deviceToken: string): Promise<MyDoubtsResponse> {
+  const res = await fetch(
+    `${SERVER_URL}/doubts/mine?deviceToken=${encodeURIComponent(deviceToken)}`,
+  );
+  if (!res.ok) throw new Error('Failed to fetch my doubts');
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Legacy / mock
+// ---------------------------------------------------------------------------
+
+export function mockLogin(_email: string, _password: string): Promise<void> {
+  return Promise.resolve();
 }

@@ -7,7 +7,9 @@ type UploadingProps = {
   sessionCode: string;
   deviceToken: string;
   onUploaded: (doubtId: string) => void;
-  onError: (err: string) => void;
+  /** err is the error message; remainingSeconds is set if the server returned
+   *  a 403 penalized response so the parent can resync the local countdown. */
+  onError: (err: string, remainingSeconds?: number) => void;
 };
 
 /**
@@ -33,7 +35,9 @@ export default function UploadingScreen({
 
     uploadAudio(audioBlob, sessionCode, deviceToken)
       .then(({ doubtId }) => onUploaded(doubtId))
-      .catch((err: Error) => onError(err.message));
+      .catch((err: Error & { remainingSeconds?: number }) =>
+        onError(err.message, err.remainingSeconds),
+      );
   }, [audioBlob, sessionCode, deviceToken, onUploaded, onError]);
 
   return (

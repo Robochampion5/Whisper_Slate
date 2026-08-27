@@ -135,6 +135,43 @@ dashboard_manager = DashboardConnectionManager()
 device_manager = DeviceChannelManager()
 
 
+class StudentChannelManager:
+    """
+    Standing per-device WebSocket channel (§13.2 step 8, §13.4).
+
+    Keyed by token_hash (SHA-256 of device_token) — the same opaque identifier
+    used throughout the system.  Completely separate from dashboard_manager and
+    device_manager: no cross-leakage is possible at the Python level.
+
+    A device connects here on join and stays connected for the whole session.
+    The review_doubt endpoint writes to this channel (AND to device_manager for
+    backward-compat) so a decision is delivered even if the /ws/device/{doubt_id}
+    subscription has already been torn down.
+    """
+
+    def __init__(self):
+        self._channels: Dict[str, WebSocket] = {}
+
+    async def connect(self, token_hash: str, websocket: WebSocket):
+        await websocket.accept()
+        # Replace any stale connection for this device
+        self._channels[token_hash] = websocket
+
+    def disconnect(self, token_hash: str):
+        self._channels.pop(token_hash, None)
+
+    async def send(self, token_hash: str, data: dict):
+        ws = self._channels.get(token_hash)
+        if ws:
+            try:
+                await ws.send_json(data)
+            except Exception:
+                self.disconnect(token_hash)
+
+
+student_manager = StudentChannelManager()
+
+
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
@@ -340,6 +377,27 @@ def ping():
 def join_session(req: JoinRequest, db: Session = Depends(get_db)):
     device_token = str(uuid.uuid4())
     token_hash = hashlib.sha256(device_token.encode()).hexdigest()
+
+    # Penalty check on (re)join — server is the source of truth (§13.3).
+    # A penalised device cannot re-enter the session until the penalty expires.
+    active_penalty = (
+        db.query(models.Penalty)
+        .filter(
+            models.Penalty.device_token_hash == token_hash,
+            models.Penalty.expires_at > datetime.datetime.utcnow(),
+        )
+        .order_by(models.Penalty.expires_at.desc())
+        .first()
+    )
+    if active_penalty:
+        remaining = int(
+            (active_penalty.expires_at - datetime.datetime.utcnow()).total_seconds()
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "penalized", "remainingSeconds": max(remaining, 0)},
+        )
+
     new_device = models.Device(token_hash=token_hash)
     db.add(new_device)
     db.commit()
@@ -621,6 +679,26 @@ async def submit_audio_doubt(
     check_rate_limit(deviceToken)
     token_hash = hashlib.sha256(deviceToken.encode()).hexdigest()
 
+    # Penalty enforcement — server is the source of truth (§13.3).
+    # The client countdown is UX only; we re-check here on every submission.
+    active_penalty = (
+        db.query(models.Penalty)
+        .filter(
+            models.Penalty.device_token_hash == token_hash,
+            models.Penalty.expires_at > datetime.datetime.utcnow(),
+        )
+        .order_by(models.Penalty.expires_at.desc())
+        .first()
+    )
+    if active_penalty:
+        remaining = int(
+            (active_penalty.expires_at - datetime.datetime.utcnow()).total_seconds()
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "penalized", "remainingSeconds": max(remaining, 0)},
+        )
+
     device = db.query(models.Device).filter(models.Device.token_hash == token_hash).first()
     if device and device.is_blocked:
         raise HTTPException(status_code=403, detail="Device is blocked.")
@@ -740,23 +818,94 @@ async def review_doubt(
 
     db.commit()
 
-    # Push decision to student's per-device WS channel
+    # Build the shared decision payload for both WS channels.
+    # penaltyExpiresAt gives the client a wall-clock anchor to resync from,
+    # more accurate than penaltySeconds which can drift if delivery is slow.
     penalty_seconds = (req.penaltyMinutes or 0) * 60
-    await device_manager.send_to_device(
-        str(doubt_id),
-        {
-            "type": "REVIEW_DECISION",
-            "doubtId": doubt_id,
-            "status": "accepted" if req.decision == "accept" else "rejected",
-            "replyMessage": req.replyText or None,
-            "penaltySeconds": penalty_seconds if req.decision == "reject" else 0,
-        },
-    )
+    penalty_expires_at: Optional[str] = None
+    if req.decision == "reject" and penalty_seconds > 0:
+        penalty_expires_at = (
+            now + datetime.timedelta(seconds=penalty_seconds)
+        ).isoformat() + "Z"
+
+    decision_payload = {
+        "type": "REVIEW_DECISION",
+        "doubtId": doubt_id,
+        "status": "accepted" if req.decision == "accept" else "rejected",
+        "replyMessage": req.replyText or None,
+        "penaltySeconds": penalty_seconds if req.decision == "reject" else 0,
+        "penaltyExpiresAt": penalty_expires_at,
+    }
+
+    # Push to doubt-scoped channel (student listening in AwaitingReviewScreen)
+    await device_manager.send_to_device(str(doubt_id), decision_payload)
+
+    # Push to standing per-device channel (catches reconnects / new WS sessions)
+    if doubt.device_token_hash:
+        await student_manager.send(doubt.device_token_hash, decision_payload)
 
     # Recluster & broadcast so the teacher dashboard cluster view refreshes
     await recluster_and_broadcast(doubt.session_code)
 
     return {"status": "ok", "doubtId": doubt_id, "decision": req.decision}
+
+
+@app.get("/doubts/mine")
+def get_my_doubts(deviceToken: str, db: Session = Depends(get_db)):
+    """
+    REST fallback for reconnect / resync (§13.4 step 6 of the implementation plan).
+
+    Called by the student app on load if it has a stored deviceToken, to recover
+    the status of any outstanding doubt and any active penalty without relying
+    on the WebSocket being open.
+
+    Returns:
+      latestDoubt: the most recent Doubt for this device (by timestamp), or null.
+      activePenalty: the soonest-expiring unexpired Penalty, or null.
+    """
+    token_hash = hashlib.sha256(deviceToken.encode()).hexdigest()
+    now = datetime.datetime.utcnow()
+
+    # Most recent doubt for this device
+    latest = (
+        db.query(models.Doubt)
+        .filter(models.Doubt.device_token_hash == token_hash)
+        .order_by(models.Doubt.timestamp.desc())
+        .first()
+    )
+
+    # Active penalty
+    penalty = (
+        db.query(models.Penalty)
+        .filter(
+            models.Penalty.device_token_hash == token_hash,
+            models.Penalty.expires_at > now,
+        )
+        .order_by(models.Penalty.expires_at.desc())
+        .first()
+    )
+
+    latest_doubt = None
+    if latest:
+        latest_doubt = {
+            "id": latest.id,
+            "status": latest.status,
+            "reviewReason": latest.review_reason,
+            # penaltySeconds only meaningful if status==rejected and penalty still active
+            "penaltySeconds": (
+                int((penalty.expires_at - now).total_seconds()) if penalty else 0
+            ),
+            "penaltyExpiresAt": penalty.expires_at.isoformat() + "Z" if penalty else None,
+        }
+
+    active_penalty = None
+    if penalty:
+        active_penalty = {
+            "remainingSeconds": int((penalty.expires_at - now).total_seconds()),
+            "expiresAt": penalty.expires_at.isoformat() + "Z",
+        }
+
+    return {"latestDoubt": latest_doubt, "activePenalty": active_penalty}
 
 
 @app.get("/clusters")
@@ -791,3 +940,28 @@ async def websocket_device_channel(doubt_id: str, websocket: WebSocket):
             await websocket.receive_text()
     except Exception:
         device_manager.disconnect(doubt_id)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket: standing per-device channel (student, whole session)
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/student/{device_token}")
+async def websocket_student_channel(device_token: str, websocket: WebSocket):
+    """
+    Standing per-device channel keyed by the raw device_token (hashed server-side).
+
+    Completely separate from /ws/dashboard — no message sent here ever reaches
+    another student or the teacher's dashboard.
+
+    The student app connects here after join() and maintains this connection
+    for the duration of the session so that REVIEW_DECISION events are delivered
+    even if the doubt-scoped /ws/device/{doubt_id} subscription has closed.
+    """
+    token_hash = hashlib.sha256(device_token.encode()).hexdigest()
+    await student_manager.connect(token_hash, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except Exception:
+        student_manager.disconnect(token_hash)
