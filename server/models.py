@@ -44,15 +44,29 @@ class Session(Base):
     code = Column(String, primary_key=True, index=True)
     start_time = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
-    # JSON list of 384-dim embedding vectors, one per topic phrase entered at session start.
-    # Null when no topics were provided.  Used for relevance scoring of incoming doubts.
+
+    # Finalised topic reference set: JSON list of 384-dim embedding vectors,
+    # one per included slide chunk AND one per typed keyword phrase.
+    # Set by POST /session/{code}/confirm-topics; null until confirmed.
+    # score_relevance() handles null gracefully (returns 0.0, not flagged).
     topic_embedding = Column(String, nullable=True)
+
+    # Raw keyword phrases typed by the teacher at session start (Phase 7).
+    # Stored as a JSON list of strings; embedded into topic_embedding at confirm-topics.
+    # Null when no keywords were typed.
+    pending_topic_phrases = Column(String, nullable=True)
 
     def set_topic_embeddings(self, vectors: list[list[float]]):
         self.topic_embedding = json.dumps(vectors)
 
     def get_topic_embeddings(self) -> list[list[float]]:
         return json.loads(self.topic_embedding) if self.topic_embedding else []
+
+    def set_pending_phrases(self, phrases: list[str]):
+        self.pending_topic_phrases = json.dumps(phrases)
+
+    def get_pending_phrases(self) -> list[str]:
+        return json.loads(self.pending_topic_phrases) if self.pending_topic_phrases else []
 
 
 class Device(Base):
@@ -77,4 +91,29 @@ class Penalty(Base):
     expires_at = Column(DateTime, nullable=False)
     reason = Column(String, nullable=True)   # mirrors Doubt.review_reason
     doubt_id = Column(Integer, ForeignKey("doubts.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SlideChunk(Base):
+    """
+    One extracted text chunk per slide/page from an uploaded slide deck (§14.2–14.3).
+
+    Persisted per-session during the teacher's review step so the UI can render
+    the checklist without re-extracting.  Rows are replaced on each new upload for
+    a session (previous chunks for the same session_code are deleted first).
+
+    After POST /session/{code}/confirm-topics, these rows are no longer needed but
+    are kept for audit — they are NOT deleted, so the teacher can always see what
+    was in the reference set.
+    """
+    __tablename__ = "slide_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_code = Column(String, index=True, nullable=False)
+    slide_index = Column(Integer, nullable=False)          # 0-based slide/page number
+    raw_text = Column(String, nullable=False)              # locally-extracted text
+    enriched_text = Column(String, nullable=True)          # optional LLM-summarised keywords
+    source_filename = Column(String, nullable=False)
+    included = Column(Boolean, default=True, nullable=False)  # teacher's checkbox state
+    char_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)

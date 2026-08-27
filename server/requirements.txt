@@ -22,3 +22,14 @@ python-multipart
 # A small classifier can be layered on later for higher toxicity recall; this handles
 # obvious cases with zero infrastructure cost.
 better-profanity
+# PyMuPDF (fitz): local PDF text extraction per page — no cloud API (§14.2).
+PyMuPDF
+# python-pptx: local PPTX text extraction from shapes + speaker notes (§14.2).
+python-pptx
+# pytesseract — OPTIONAL, not installed by default.
+# Only required when OCR_ENABLED=true in the environment.
+# Requires a system-level Tesseract install (brew install tesseract / apt install tesseract-ocr).
+# The app is fully functional with OCR_ENABLED unset — scanned/image-heavy slides simply
+# produce empty chunks, which are excluded from the reference set gracefully.
+# Uncomment if you want OCR support:
+# pytesseract

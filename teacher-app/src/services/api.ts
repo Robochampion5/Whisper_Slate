@@ -9,7 +9,7 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 /**
  * Starts a new classroom session.
  * @param topics  Optional list of topic keyword phrases typed by the teacher.
- *                Embedded server-side and used for relevance scoring.
+ *                Stored as raw strings; embedded at confirm-topics time (§14.3).
  */
 export async function startSession(topics?: string[]): Promise<string> {
   const res = await fetch(`${API_BASE}/session/start`, {
@@ -24,6 +24,70 @@ export async function startSession(topics?: string[]): Promise<string> {
 
 export async function stopSession(sessionCode: string): Promise<void> {
   await fetch(`${API_BASE}/session/stop?sessionCode=${sessionCode}`, { method: 'POST' });
+}
+
+// ---------------------------------------------------------------------------
+// Slides (§14)
+// ---------------------------------------------------------------------------
+
+export interface SlideChunk {
+  id: number;
+  index: number;
+  raw_text: string;
+  preview: string;          // first 120 chars of raw_text
+  enriched_text: string | null;
+  source_filename: string;
+  char_count: number;
+  included: boolean;
+}
+
+/**
+ * Upload a .pdf or .pptx file and receive extracted slide chunks for review.
+ * Replaces any previous upload for this session.
+ */
+export async function uploadSlides(sessionCode: string, file: File): Promise<SlideChunk[]> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${API_BASE}/session/${sessionCode}/slides`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? `Upload failed (${res.status})`);
+  }
+  const data = await res.json();
+  return data.chunks as SlideChunk[];
+}
+
+/**
+ * Save the teacher's checkbox selections (included/excluded per slide).
+ */
+export async function updateSlideSelections(
+  sessionCode: string,
+  selections: { id: number; included: boolean }[],
+): Promise<void> {
+  await fetch(`${API_BASE}/session/${sessionCode}/slides`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chunks: selections }),
+  });
+}
+
+/**
+ * Finalise the topic reference set for the session:
+ * embeds included slide chunks + typed keyword phrases in one batch.
+ * After this call, relevance scoring is live for all subsequent doubts.
+ */
+export async function confirmTopics(sessionCode: string): Promise<{ vectorCount: number }> {
+  const res = await fetch(`${API_BASE}/session/${sessionCode}/confirm-topics`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? `Confirm failed (${res.status})`);
+  }
+  return res.json();
 }
 
 // ---------------------------------------------------------------------------

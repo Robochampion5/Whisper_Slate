@@ -87,6 +87,25 @@ def embed(text: str) -> list[float]:
     return vector.tolist()
 
 
+def embed_chunks(texts: list[str]) -> list[list[float]]:
+    """
+    Batch-embed a list of strings.  Prefer this over calling embed() in a loop
+    when processing slide decks — sentence-transformers handles batching
+    efficiently (parallel tokenisation + single GPU/CPU forward pass per batch).
+
+    Args:
+        texts: List of non-empty strings to embed.
+
+    Returns:
+        List of 384-dim vectors, one per input string, in the same order.
+        Returns [] if texts is empty.
+    """
+    if not texts:
+        return []
+    vectors = _embedding_model.encode(texts, normalize_embeddings=True, batch_size=32)
+    return [v.tolist() for v in vectors]
+
+
 def check_appropriateness(text: str) -> tuple[bool, float]:
     """
     Run a lightweight, local appropriateness check using better-profanity.

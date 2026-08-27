@@ -20,6 +20,7 @@ import models
 from database import SessionLocal, engine
 import clustering
 import ai_pipeline  # noqa: F401 — imported here so both models load at server startup
+import slide_extractor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -348,24 +349,26 @@ def join_session(req: JoinRequest, db: Session = Depends(get_db)):
 @app.post("/session/start", response_model=SessionStartResponse)
 def start_session(req: SessionStartRequest = SessionStartRequest(), db: Session = Depends(get_db)):
     """
-    Starts a new classroom session.
+    Starts a new classroom session and returns the session code immediately.
 
     Optional body: { "topics": ["recursion", "stack overflow", "base case"] }
 
-    Each non-empty topic phrase is embedded with all-MiniLM-L6-v2 once here and
-    stored on the Session row.  These embeddings are used as the topic reference set
-    for relevance scoring of all doubts submitted during this session (§13.3, §14.3–14.4).
+    Topic phrases are stored as raw strings here — embedding is deferred to
+    POST /session/{code}/confirm-topics (§14.3 step 5).  This lets students join
+    via the session code while the teacher is still reviewing the slide deck.
+
+    If the teacher never uploads slides and never calls confirm-topics, relevance
+    scoring returns (0.0, False) for all doubts — no false alarms (§14.4).
     """
     code = str(uuid.uuid4())[:6].upper()
     session = models.Session(code=code)
 
-    # Embed topics if provided
+    # Store raw phrases; embedding happens at confirm-topics together with slide chunks
     if req.topics:
         phrases = [t.strip() for t in req.topics if t.strip()]
         if phrases:
-            topic_vecs = [ai_pipeline.embed(phrase) for phrase in phrases]
-            session.set_topic_embeddings(topic_vecs)
-            logger.info("Session %s: embedded %d topic phrase(s): %s", code, len(phrases), phrases)
+            session.set_pending_phrases(phrases)
+            logger.info("Session %s: stored %d pending topic phrase(s): %s", code, len(phrases), phrases)
 
     db.add(session)
     db.commit()
@@ -379,6 +382,205 @@ def stop_session(sessionCode: str, db: Session = Depends(get_db)):
         session.is_active = False
         db.commit()
     return {"status": "stopped"}
+
+
+# ---------------------------------------------------------------------------
+# Slide extraction endpoints (§14)
+# ---------------------------------------------------------------------------
+
+SLIDE_CHUNK_PREVIEW_LEN = 120  # chars shown in the review UI per slide
+
+
+@app.post("/session/{session_code}/slides")
+async def upload_slides(
+    session_code: str,
+    file: UploadFile = File(..., description=".pdf or .pptx lecture slides"),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload a slide deck (.pdf or .pptx) for a session.
+
+    Validates format, enforces max file size, extracts one text chunk per
+    slide/page using local libraries only (§14.2), optionally runs enrichment
+    if ENRICHMENT_PROVIDER is configured, and persists SlideChunk rows.
+
+    Any previous slide upload for this session is replaced.
+
+    Returns the list of chunks for the teacher's review UI (§14.3 step 4).
+    """
+    session = db.query(models.Session).filter(models.Session.code == session_code).first()
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_code}' not found.")
+
+    # --- Size check ---
+    data = await file.read()
+    if len(data) > slide_extractor.MAX_SLIDE_FILE_BYTES:
+        mb = slide_extractor.MAX_SLIDE_FILE_BYTES // (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum allowed size is {mb} MB.",
+        )
+
+    # --- Extraction ---
+    filename = file.filename or "upload"
+    try:
+        raw_chunks = slide_extractor.extract_slides(data, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error("Slide extraction failed for '%s': %s", filename, exc)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not process '{filename}'. The file may be corrupt or in an unexpected format.",
+        )
+
+    # --- Replace previous chunks for this session ---
+    db.query(models.SlideChunk).filter(
+        models.SlideChunk.session_code == session_code
+    ).delete()
+
+    db_chunks = []
+    for chunk in raw_chunks:
+        db_chunk = models.SlideChunk(
+            session_code=session_code,
+            slide_index=chunk.index,
+            raw_text=chunk.text,
+            enriched_text=chunk.enriched_text,
+            source_filename=chunk.source_filename,
+            char_count=chunk.char_count,
+            included=chunk.char_count > 0,  # pre-deselect empty slides
+        )
+        db.add(db_chunk)
+        db_chunks.append(db_chunk)
+
+    db.commit()
+    for c in db_chunks:
+        db.refresh(c)
+
+    logger.info(
+        "Session %s: stored %d chunk(s) from '%s'",
+        session_code, len(db_chunks), filename,
+    )
+
+    return {
+        "sessionCode": session_code,
+        "sourceFilename": filename,
+        "chunks": [
+            {
+                "id": c.id,
+                "index": c.slide_index,
+                "raw_text": c.raw_text,
+                "preview": c.raw_text[:SLIDE_CHUNK_PREVIEW_LEN],
+                "enriched_text": c.enriched_text,
+                "source_filename": c.source_filename,
+                "char_count": c.char_count,
+                "included": c.included,
+            }
+            for c in db_chunks
+        ],
+    }
+
+
+class SlideSelectionUpdate(BaseModel):
+    chunks: List[dict]  # [{ id: int, included: bool }]
+
+
+@app.patch("/session/{session_code}/slides")
+def update_slide_selections(
+    session_code: str,
+    req: SlideSelectionUpdate,
+    db: Session = Depends(get_db),
+):
+    """
+    Update the teacher's checkbox selections for slide chunks.
+    Called each time a checkbox is toggled in the review UI.
+    """
+    updated = 0
+    for item in req.chunks:
+        chunk_id = item.get("id")
+        included = item.get("included")
+        if chunk_id is None or included is None:
+            continue
+        chunk = (
+            db.query(models.SlideChunk)
+            .filter(
+                models.SlideChunk.id == chunk_id,
+                models.SlideChunk.session_code == session_code,
+            )
+            .first()
+        )
+        if chunk:
+            chunk.included = bool(included)
+            updated += 1
+    db.commit()
+    return {"updated": updated}
+
+
+@app.post("/session/{session_code}/confirm-topics")
+def confirm_topics(
+    session_code: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Finalises the topic reference set for a session (§14.3 step 5).
+
+    Combines:
+      1. All included SlideChunk texts (raw_text only — never enriched_text,
+         to keep the embedding space consistent with the model's training).
+      2. Any pending typed keyword phrases stored at session start.
+
+    Embeds all texts in a single batch via ai_pipeline.embed_chunks(), stores
+    the resulting list of 384-dim vectors on Session.topic_embedding.
+
+    Relevance scoring (score_relevance) uses the max cosine similarity across
+    the whole reference set per §14.4 — averaging the whole deck into one vector
+    would wash out doubts genuinely relevant to only one or two slides.
+
+    After this call, relevance scoring is live for all subsequent doubts.
+    Previously submitted doubts are not re-scored (MVP decision).
+    """
+    session = db.query(models.Session).filter(models.Session.code == session_code).first()
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_code}' not found.")
+
+    texts_to_embed: list[str] = []
+
+    # 1. Included slide chunks
+    included_chunks = (
+        db.query(models.SlideChunk)
+        .filter(
+            models.SlideChunk.session_code == session_code,
+            models.SlideChunk.included == True,  # noqa: E712
+            models.SlideChunk.char_count > 0,
+        )
+        .order_by(models.SlideChunk.slide_index)
+        .all()
+    )
+    slide_texts = [c.raw_text for c in included_chunks]
+    texts_to_embed.extend(slide_texts)
+
+    # 2. Pending typed keyword phrases from session start
+    keyword_phrases = session.get_pending_phrases()
+    non_empty_phrases = [p for p in keyword_phrases if p.strip()]
+    texts_to_embed.extend(non_empty_phrases)
+
+    if not texts_to_embed:
+        logger.warning("Session %s: confirm-topics called but no texts to embed", session_code)
+        return {"sessionCode": session_code, "vectorCount": 0, "note": "No topics to embed."}
+
+    logger.info(
+        "Session %s: embedding %d text(s) (%d slide chunks + %d keyword phrases)",
+        session_code, len(texts_to_embed), len(slide_texts), len(non_empty_phrases),
+    )
+    vectors = ai_pipeline.embed_chunks(texts_to_embed)
+    session.set_topic_embeddings(vectors)
+    db.commit()
+
+    logger.info(
+        "Session %s: topic reference set confirmed — %d vector(s)",
+        session_code, len(vectors),
+    )
+    return {"sessionCode": session_code, "vectorCount": len(vectors)}
 
 
 @app.post("/devices/{device_token}/block")
