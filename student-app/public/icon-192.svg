@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <!-- Teal gradient background -->
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d9488"/>
+      <stop offset="100%" style="stop-color:#064e3b"/>
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="32" fill="url(#bg)"/>
+
+  <!-- Microphone icon -->
+  <g transform="translate(96, 96)">
+    <!-- Mic body -->
+    <path d="M-16 -48 C-16 -62.5 0 -74.5 14 -74.5 C28 -74.5 44 -62.5 44 -48 L44 -12"
+          fill="none" stroke="white" stroke-width="8" stroke-linecap="round"/>
+    <!-- Mic base -->
+    <path d="M-24 -12 L-24 -4 C-24 6.5 -15.5 15 -4 15 L4 15 C15.5 15 24 6.5 24 -4 L24 -12"
+          fill="none" stroke="white" stroke-width="8" stroke-linecap="round"/>
+    <!-- Mic stand -->
+    <path d="M-8 -4 L-8 8" fill="none" stroke="white" stroke-width="6" stroke-linecap="round"/>
+    <path d="M8 -4 L8 8" fill="none" stroke="white" stroke-width="6" stroke-linecap="round"/>
+    <path d="M-8 8 L8 8" fill="none" stroke="white" stroke-width="6" stroke-linecap="round"/>
+  </g>
+</svg>

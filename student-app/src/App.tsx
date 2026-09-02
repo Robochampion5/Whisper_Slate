@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import ConnectionBadge from './components/ConnectionBadge'
 import LoginScreen from './components/LoginScreen'
 import CaptureScreen from './components/CaptureScreen'
+import PreviewScreen from './components/PreviewScreen'
 import UploadingScreen from './components/UploadingScreen'
 import AwaitingReviewScreen, { type ReviewDecision } from './components/AwaitingReviewScreen'
 import OutcomeScreen from './components/ConfirmationScreen'
@@ -12,11 +13,11 @@ import type { StudentWsMessage } from './services/studentWs'
 // ---------------------------------------------------------------------------
 // State machine (v2 architecture — §13.4):
 //
-//   LOGIN → CAPTURE → UPLOADING → AWAITING_REVIEW → OUTCOME → CAPTURE
+//   LOGIN → CAPTURE → PREVIEW → UPLOADING → AWAITING_REVIEW → OUTCOME → CAPTURE
 //
 // The penalty countdown lives at App level so CaptureScreen can always see it.
 // ---------------------------------------------------------------------------
-type AppState = 'LOGIN' | 'CAPTURE' | 'UPLOADING' | 'AWAITING_REVIEW' | 'OUTCOME'
+type AppState = 'LOGIN' | 'CAPTURE' | 'PREVIEW' | 'UPLOADING' | 'AWAITING_REVIEW' | 'OUTCOME'
 
 // Storage keys for cross-session recovery
 const STORAGE_KEY_TOKEN = 'ws_device_token'
@@ -31,6 +32,9 @@ function App() {
 
   // Set when the user finishes recording
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null)
+
+  // Set in PREVIEW state — the transcribed text (may be edited by user)
+  const [previewText, setPreviewText] = useState('')
 
   // Set when the server responds to /doubts/audio
   const [doubtId, setDoubtId] = useState('')
@@ -183,11 +187,14 @@ function App() {
   // Transition handlers
   // -------------------------------------------------------------------------
 
-  const handleLoginSuccess = (code: string, token: string) => {
+  const handleLoginSuccess = (code: string, token: string, authToken?: string) => {
     setSessionCode(code)
     setDeviceToken(token)
     // Persist for resync on reload
     localStorage.setItem(STORAGE_KEY_TOKEN, token)
+    if (authToken) {
+      localStorage.setItem('auth_token', authToken)
+    }
     connectStudentWs(token)
     setAppState('CAPTURE')
   }
@@ -198,7 +205,7 @@ function App() {
       return
     }
     setAudioBlob(blob)
-    setAppState('UPLOADING')
+    setAppState('PREVIEW')
   }
 
   const handleUploaded = useCallback((id: string) => {
@@ -235,6 +242,20 @@ function App() {
     setAudioBlob(null)
     setDoubtId('')
     setReviewDecision(null)
+    setPreviewText('')
+    setAppState('CAPTURE')
+  }
+
+  const handlePreviewSend = (text: string) => {
+    // User confirmed the transcript (possibly edited); move to upload
+    setPreviewText(text)
+    setAppState('UPLOADING')
+  }
+
+  const handlePreviewCancel = () => {
+    // User discarded the recording; go back to capture
+    setAudioBlob(null)
+    setPreviewText('')
     setAppState('CAPTURE')
   }
 
@@ -257,11 +278,20 @@ function App() {
         />
       )}
 
+      {appState === 'PREVIEW' && audioBlob && (
+        <PreviewScreen
+          audioBlob={audioBlob}
+          onSend={handlePreviewSend}
+          onCancel={handlePreviewCancel}
+        />
+      )}
+
       {appState === 'UPLOADING' && audioBlob && (
         <UploadingScreen
           audioBlob={audioBlob}
           sessionCode={sessionCode}
           deviceToken={deviceToken}
+          transcriptOverride={previewText}
           onUploaded={handleUploaded}
           onError={handleUploadError}
         />

@@ -12,6 +12,27 @@ export async function pingServer(): Promise<boolean> {
   }
 }
 
+export interface AuthLoginResponse {
+  token: string;
+  user_id: number;
+  college_id: string;
+}
+
+export async function authLogin(collegeId: string, password: string): Promise<AuthLoginResponse> {
+  const res = await fetch(`${SERVER_URL}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ college_id: collegeId, password }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`Login failed (${res.status}): ${text}`);
+  }
+
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // Penalty response shape — returned as the 403 detail on penalised requests
 // ---------------------------------------------------------------------------
@@ -34,9 +55,16 @@ function isPenaltyDetail(body: unknown): body is PenaltyError {
 // ---------------------------------------------------------------------------
 
 export async function joinSession(classCode: string): Promise<string> {
+  // Include JWT from localStorage if available (for authenticated joins)
+  const authToken = localStorage.getItem('auth_token');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  }
+
   const res = await fetch(`${SERVER_URL}/session/join`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ classCode }),
   });
 
@@ -61,17 +89,25 @@ export async function joinSession(classCode: string): Promise<string> {
  * Returns { doubtId, status: "processing" } on success.
  *
  * Throws a PenaltyError-shaped Error if the server returns 403 penalized.
+ * For rate limit (429), throws Error with status and retryAfter properties.
+ *
+ * @param transcriptOverride Optional pre-transcribed text from the preview screen.
+ *   When provided, the server uses this instead of transcribing the audio.
  */
 export async function uploadAudio(
   audioBlob: Blob,
   sessionCode: string,
   deviceToken: string,
+  transcriptOverride?: string,
 ): Promise<{ doubtId: string; status: string }> {
   const form = new FormData();
   const ext = audioBlob.type.includes('webm') ? '.webm' : '.wav';
   form.append('audio', audioBlob, `doubt${ext}`);
   form.append('sessionCode', sessionCode);
   form.append('deviceToken', deviceToken);
+  if (transcriptOverride) {
+    form.append('transcriptOverride', transcriptOverride);
+  }
 
   const res = await fetch(`${SERVER_URL}/doubts/audio`, {
     method: 'POST',
@@ -86,7 +122,12 @@ export async function uploadAudio(
 
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Upload failed (${res.status}): ${text}`);
+    // Include status and retry-after for rate limit handling
+    const retryAfter = res.headers.get('retry-after');
+    const err = new Error(`Upload failed (${res.status}): ${text}`);
+    (err as any).status = res.status;
+    if (retryAfter) (err as any).retryAfter = parseInt(retryAfter, 10);
+    throw err;
   }
 
   return res.json();

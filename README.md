@@ -55,7 +55,7 @@ This is a monorepo with three parts:
 
 ---
 
-## Quick Start
+## Quick Start (Development)
 
 ### Prerequisites
 
@@ -98,6 +98,36 @@ npm run dev -- --port 5173
 
 ---
 
+## Classroom Deployment (Production)
+
+For running in a real classroom on a local network (no internet), see **[docs/deployment.md](docs/deployment.md)**.
+
+The deployment guide covers:
+- Hardware setup (travel router, laptop)
+- Network configuration (AP mode, DHCP)
+- Environment variables for all three apps
+- HTTPS/SSL with self-signed certificates
+- Nginx reverse proxy configuration
+- In-class workflow
+
+---
+
+## Key Features
+
+| Feature | Description |
+|---|---|
+| **Transcript Preview** | Students can view and edit the AI-transcribed text before sending (§9.1) |
+| **College Login / JWT Auth** | Mock college ID + password authentication with JWT tokens (§7, §8) |
+| **Escalating Bans** | Penalty durations escalate: 5min → 1d → 3d → 7d → 30d (§7) |
+| **Identity Traceability** | Doubts linked to `user_id` server-side; dashboard stays anonymous |
+| **Dynamic QR Code** | Auto-detects LAN IP via WebRTC — works on any network |
+| **PWA Support** | Installable on student phones, offline-capable shell |
+| **Drag-and-Drop Slides** | Teacher uploads PDF/PPTX for topic context extraction |
+| **Rate-Limit Feedback** | Student sees countdown timer when hitting 5 doubts/min limit |
+| **Device Block/Kick** | Teacher can block or kick devices from dashboard panel |
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -109,3 +139,54 @@ npm run dev -- --port 5173
 | Local sync server | Python FastAPI, SQLite, WebSockets |
 | Clustering | `scikit-learn` `AgglomerativeClustering` (cosine distance) |
 | Teacher dashboard | React 19, Vite, TypeScript, Tailwind CSS, `recharts` |
+
+---
+
+## Environment Variables
+
+Each app has a `.env.example` file — copy to `.env` and fill in:
+
+| App | File | Key Variables |
+|---|---|---|
+| Server | `server/.env.example` | `DATABASE_URL`, `JWT_SECRET`, `AUTH_COLLEGE_IDS`, `CORS_ORIGINS`, `OCR_ENABLED`, `ENRICHMENT_PROVIDER`, `OPENAI_API_KEY` |
+| Student App | `student-app/.env.example` | `VITE_API_URL` |
+| Teacher App | `teacher-app/.env.example` | `VITE_API_URL` |
+
+---
+
+## Project Structure
+
+```
+whisper-slate/
+├── server/                 # FastAPI server
+│   ├── main.py            # All endpoints, WebSockets, AI pipeline
+│   ├── models.py          # SQLAlchemy models (User, Device, Doubt, Penalty, SlideChunk)
+│   ├── auth.py            # JWT utilities, ban escalation logic
+│   ├── clustering.py      # Agglomerative clustering + spike detection
+│   ├── ai_pipeline.py     # faster-whisper + sentence-transformers
+│   ├── slide_extractor.py # PDF/PPTX text + OCR extraction
+│   ├── database.py        # SQLite/SQLAlchemy setup
+│   ├── requirements.txt
+│   └── .env.example
+├── student-app/           # Student PWA
+│   ├── src/
+│   │   ├── App.tsx        # State machine: LOGIN→CAPTURE→PREVIEW→UPLOADING→AWAITING_REVIEW→OUTCOME
+│   │   ├── components/    # LoginScreen, CaptureScreen, PreviewScreen, UploadingScreen, AwaitingReviewScreen, OutcomeScreen
+│   │   └── services/      # api.ts (REST), studentWs.ts (WebSocket)
+│   ├── public/            # PWA icons (icon-192.svg, icon-512.svg)
+│   ├── vite.config.ts     # PWA manifest config
+│   └── .env.example
+├── teacher-app/           # Teacher dashboard
+│   ├── src/
+│   │   ├── components/    # Dashboard, SessionScreen, DevicePanel, ModerationQueue, ClusterCard, GlobalTimeline
+│   │   └── utils/         # getLanIp.ts (WebRTC LAN IP detection)
+│   └── .env.example
+└── docs/
+    └── deployment.md      # Production deployment guide
+```
+
+---
+
+## License
+
+MIT — see LICENSE file.

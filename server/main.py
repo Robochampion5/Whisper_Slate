@@ -21,6 +21,7 @@ from database import SessionLocal, engine
 import clustering
 import ai_pipeline  # noqa: F401 — imported here so both models load at server startup
 import slide_extractor
+import auth
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,9 +33,14 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Whisper Slate Local Sync Server")
 
 # Allow CORS for local network development
+# In production, set CORS_ORIGINS env var to comma-separated list (e.g. "http://192.168.1.5:5173,http://10.0.0.2:5173")
+# Default allows localhost for development
+cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,7 +79,13 @@ def check_rate_limit(device_token: str):
         return
 
     if record['count'] >= RATE_LIMIT_MAX:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a minute.")
+        # Calculate seconds until reset
+        reset_seconds = int((record['reset_time'] - now).total_seconds())
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please wait a minute.",
+            headers={"Retry-After": str(max(reset_seconds, 1))}
+        )
 
     record['count'] += 1
 
@@ -251,7 +263,7 @@ def generate_dashboard_payload(session_code: str, db: Session) -> dict:
         .all()
     )
     devices = [
-        {"id": d.token_hash[:8], "full_token": "hidden", "is_blocked": d.is_blocked}
+        {"id": d.token_hash, "is_blocked": d.is_blocked}
         for d in devices_orm
     ]
 
@@ -278,12 +290,14 @@ async def recluster_and_broadcast(session_code: str):
 # Background task: transcribe → delete audio → embed → screen → update DB → broadcast
 # ---------------------------------------------------------------------------
 
-async def process_audio_doubt(doubt_id: int, tmp_audio_path: str, session_code: str):
+async def process_audio_doubt(
+    doubt_id: int, tmp_audio_path: str, session_code: str, transcript_override: str = None
+):
     """
     Full AI pipeline, runs asynchronously after POST /doubts/audio returns.
 
     Steps:
-    1. Transcribe with faster-whisper.
+    1. Transcribe with faster-whisper (or use transcript_override if provided).
     2. DELETE the temp audio file — raw audio never stored at rest (§13.2 step 3).
     3. Embed the transcript with sentence-transformers.
     4. Appropriateness screening (better-profanity) — advisory flag only.
@@ -294,20 +308,24 @@ async def process_audio_doubt(doubt_id: int, tmp_audio_path: str, session_code: 
     """
     db = SessionLocal()
     try:
-        # --- Step 1: Transcribe ---
-        logger.info("Transcribing doubt %s from %s", doubt_id, tmp_audio_path)
-        try:
-            transcript = ai_pipeline.transcribe(tmp_audio_path)
-        except Exception as exc:
-            logger.error("Transcription failed for doubt %s: %s", doubt_id, exc)
-            transcript = ""
-        finally:
-            # --- Step 2: Delete audio regardless of success/failure ---
+        # --- Step 1: Transcribe or use override ---
+        if transcript_override:
+            transcript = transcript_override
+            logger.info("Using transcript override for doubt %s: %r", doubt_id, transcript[:80])
+        else:
+            logger.info("Transcribing doubt %s from %s", doubt_id, tmp_audio_path)
             try:
-                os.remove(tmp_audio_path)
-                logger.info("Deleted temp audio: %s", tmp_audio_path)
-            except FileNotFoundError:
-                pass
+                transcript = ai_pipeline.transcribe(tmp_audio_path)
+            except Exception as exc:
+                logger.error("Transcription failed for doubt %s: %s", doubt_id, exc)
+                transcript = ""
+
+        # --- Step 2: Delete audio regardless of success/failure ---
+        try:
+            os.remove(tmp_audio_path)
+            logger.info("Deleted temp audio: %s", tmp_audio_path)
+        except FileNotFoundError:
+            pass
 
         if not transcript:
             doubt = db.query(models.Doubt).filter(models.Doubt.id == doubt_id).first()
@@ -373,8 +391,107 @@ def ping():
     return {"status": "ok"}
 
 
+class AuthLoginRequest(BaseModel):
+    college_id: str
+    password: str
+
+
+class AuthLoginResponse(BaseModel):
+    token: str
+    user_id: int
+    college_id: str
+
+
+@app.post("/auth/login", response_model=AuthLoginResponse)
+def auth_login(req: AuthLoginRequest, db: Session = Depends(get_db)):
+    """
+    MVP: Validate college credentials against mock store.
+    Production: Replace with OAuth2/SAML institutional SSO.
+    Returns JWT on success.
+    """
+    if not auth.validate_college_login(req.college_id, req.password):
+        raise HTTPException(status_code=401, detail="Invalid college credentials")
+
+    # Find or create user
+    user = db.query(models.User).filter(models.User.college_id == req.college_id).first()
+    if not user:
+        user = models.User(college_id=req.college_id, email=f"{req.college_id}@college.edu")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # Check if user is currently banned
+    if user.is_banned and user.ban_expires_at and user.ban_expires_at > datetime.datetime.utcnow():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "banned",
+                "expiresAt": user.ban_expires_at.isoformat(),
+                "message": "Account is banned. Contact admin."
+            }
+        )
+
+    token = auth.create_jwt(user.id, user.college_id)
+    return {"token": token, "user_id": user.id, "college_id": user.college_id}
+
+
+def get_current_user(
+    authorization: str = Header(None, alias="Authorization"),
+    db: Session = Depends(get_db),
+) -> models.User:
+    """
+    FastAPI dependency to extract and validate JWT, returning the User.
+    Raises 401 if token is missing/invalid/expired.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+    token = authorization[7:]  # Strip "Bearer "
+    payload = auth.decode_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = db.query(models.User).filter(models.User.id == payload["user_id"]).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user
+
+
 @app.post("/session/join", response_model=JoinResponse)
-def join_session(req: JoinRequest, db: Session = Depends(get_db)):
+def join_session(
+    req: JoinRequest,
+    authorization: str = Header(None, alias="Authorization"),
+    db: Session = Depends(get_db),
+):
+    """
+    Join a session with a JWT from /auth/login.
+    Returns a device token for this session.
+    """
+    # Validate JWT
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    token = authorization[7:]
+    payload = auth.decode_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = db.query(models.User).filter(models.User.id == payload["user_id"]).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # Check if user is currently banned
+    if user.is_banned and user.ban_expires_at and user.ban_expires_at > datetime.datetime.utcnow():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "banned",
+                "expiresAt": user.ban_expires_at.isoformat(),
+                "message": "Account is banned. Contact admin."
+            }
+        )
+
     device_token = str(uuid.uuid4())
     token_hash = hashlib.sha256(device_token.encode()).hexdigest()
 
@@ -398,7 +515,7 @@ def join_session(req: JoinRequest, db: Session = Depends(get_db)):
             detail={"error": "penalized", "remainingSeconds": max(remaining, 0)},
         )
 
-    new_device = models.Device(token_hash=token_hash)
+    new_device = models.Device(token_hash=token_hash, user_id=user.id)
     db.add(new_device)
     db.commit()
     return {"device_token": device_token}
@@ -641,24 +758,59 @@ def confirm_topics(
     return {"sessionCode": session_code, "vectorCount": len(vectors)}
 
 
-@app.post("/devices/{device_token}/block")
-def block_device(device_token: str, db: Session = Depends(get_db)):
-    token_hash = hashlib.sha256(device_token.encode()).hexdigest()
-    device = db.query(models.Device).filter(models.Device.token_hash == token_hash).first()
+@app.post("/devices/{device_token_hash}/block")
+def block_device(device_token_hash: str, db: Session = Depends(get_db)):
+    """
+    Block a device by its token hash (the full SHA-256 hash, not the raw token).
+    The dashboard provides the hash directly as the device ID.
+    """
+    device = db.query(models.Device).filter(models.Device.token_hash == device_token_hash).first()
     if device:
         device.is_blocked = True
         db.commit()
     return {"status": "blocked"}
 
 
-@app.post("/devices/{device_token}/kick")
-def kick_device(device_token: str, db: Session = Depends(get_db)):
-    token_hash = hashlib.sha256(device_token.encode()).hexdigest()
-    device = db.query(models.Device).filter(models.Device.token_hash == token_hash).first()
+@app.post("/devices/{device_token_hash}/kick")
+def kick_device(device_token_hash: str, db: Session = Depends(get_db)):
+    """
+    Remove a device by its token hash (the full SHA-256 hash, not the raw token).
+    The dashboard provides the hash directly as the device ID.
+    """
+    device = db.query(models.Device).filter(models.Device.token_hash == device_token_hash).first()
     if device:
         db.delete(device)
         db.commit()
     return {"status": "kicked"}
+
+
+@app.post("/doubts/transcribe-preview")
+async def transcribe_preview(
+    audio: UploadFile = File(..., description="Raw audio to transcribe for preview only"),
+):
+    """
+    Transcribe audio and return the text immediately without saving to DB.
+    Used by the student app's preview/edit screen before final submission.
+    No rate limiting or penalty checks — this is a client-side convenience.
+    """
+    suffix = os.path.splitext(audio.filename or "audio.webm")[1] or ".webm"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        contents = await audio.read()
+        tmp.write(contents)
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    try:
+        text = ai_pipeline.transcribe(tmp_path)
+        return {"text": text}
+    finally:
+        # Clean up the temp file immediately
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 @app.post("/doubts/audio", response_model=AudioDoubtResponse)
@@ -667,11 +819,16 @@ async def submit_audio_doubt(
     audio: UploadFile = File(..., description="Raw audio from MediaRecorder (webm/opus or wav)"),
     sessionCode: str = Form(...),
     deviceToken: str = Form(...),
+    transcriptOverride: str = Form(None, description="Pre-transcribed text from preview screen (optional)"),
     db: Session = Depends(get_db),
 ):
     """
     Accepts raw audio from a student, creates a Doubt row with status="processing",
     and returns { doubtId, status: "processing" } immediately.
+
+    If transcriptOverride is provided (from the preview/edit screen), it is used
+    directly instead of transcribing the audio. The audio file is still saved temporarily
+    for audit purposes but is deleted after the background task completes.
 
     Transcription, embedding, and pre-screening run in a BackgroundTask so this
     endpoint returns within milliseconds.
@@ -730,7 +887,9 @@ async def submit_audio_doubt(
     finally:
         tmp.close()
 
-    background_tasks.add_task(process_audio_doubt, db_doubt.id, tmp_path, sessionCode)
+    background_tasks.add_task(
+        process_audio_doubt, db_doubt.id, tmp_path, sessionCode, transcriptOverride
+    )
 
     return {"doubtId": str(db_doubt.id), "status": "processing"}
 
@@ -801,19 +960,49 @@ async def review_doubt(
         doubt.status = "rejected"
         doubt.review_reason = req.reason
 
-        # Create penalty row if a duration was specified
+        # Create penalty row if a duration was specified (§7 escalating bans)
         pm = req.penaltyMinutes or 0
         if pm > 0 and doubt.device_token_hash:
+            # Get user_id for escalation tracking
+            device = (
+                db.query(models.Device)
+                .filter(models.Device.token_hash == doubt.device_token_hash)
+                .first()
+            )
+            user_id = device.user_id if device else None
+
+            # Calculate penalty duration based on user's ban history (§7)
+            if user_id:
+                penalty_seconds, ban_level = auth.calculate_penalty_duration(user_id, db)
+            else:
+                # Fallback: use provided penaltyMinutes
+                penalty_seconds = pm * 60
+                ban_level = 0
+
+            is_ban = ban_level > 0
+            expires_at = now + datetime.timedelta(seconds=penalty_seconds)
+
             penalty = models.Penalty(
                 device_token_hash=doubt.device_token_hash,
-                expires_at=now + datetime.timedelta(minutes=pm),
+                user_id=user_id,
+                expires_at=expires_at,
                 reason=req.reason,
                 doubt_id=doubt_id,
+                is_ban=is_ban,
+                ban_level=ban_level,
             )
             db.add(penalty)
+
+            # Update user's ban status
+            if user_id and is_ban:
+                user = db.query(models.User).filter(models.User.id == user_id).first()
+                if user:
+                    user.is_banned = True
+                    user.ban_expires_at = expires_at
+
             logger.info(
-                "Penalty created: device=%s…, minutes=%d, expires=%s",
-                doubt.device_token_hash[:8], pm, penalty.expires_at.isoformat()
+                "Penalty created: device=%s…, user_id=%s, seconds=%d, ban_level=%d, expires=%s",
+                doubt.device_token_hash[:8], user_id, penalty_seconds, ban_level, expires_at.isoformat()
             )
 
     db.commit()

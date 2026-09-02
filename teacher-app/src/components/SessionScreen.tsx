@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   ChevronDown, ChevronUp, Play, XCircle, Tag,
@@ -7,6 +7,7 @@ import {
 import { SlideReviewList } from './SlideReviewList';
 import * as api from '../services/api';
 import type { SlideChunk } from '../services/api';
+import { getLanIpAndPort } from '../utils/getLanIp';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -42,7 +43,19 @@ export const SessionScreen: React.FC<SessionScreenProps> = ({ sessionCode, onSta
   const [confirmError, setConfirmError] = useState('');
   const [vectorCount, setVectorCount] = useState(0);
 
+  // ── QR code URL with dynamic LAN IP ──────────────────────────────────────
+  const [qrUrl, setQrUrl] = useState('');
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Detect LAN IP when session starts
+  useEffect(() => {
+    if (sessionCode) {
+      getLanIpAndPort().then(hostPort => {
+        setQrUrl(`http://${hostPort}/?code=${sessionCode}`);
+      });
+    }
+  }, [sessionCode]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
 
@@ -71,6 +84,29 @@ export const SessionScreen: React.FC<SessionScreenProps> = ({ sessionCode, onSta
     } finally {
       // Reset input so the same file can be re-uploaded after an error
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const files = e.dataTransfer.files;
+    if (files.length > 0 && !sessionCode) return;
+
+    // Trigger file input change with the dropped file
+    if (fileInputRef.current) {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(files[0]);
+      fileInputRef.current.files = dataTransfer.files;
+
+      const event = new Event('change', { bubbles: true });
+      fileInputRef.current.dispatchEvent(event);
     }
   };
 
@@ -112,14 +148,17 @@ export const SessionScreen: React.FC<SessionScreenProps> = ({ sessionCode, onSta
   };
 
   // ── Session code / QR badge (shown whenever session is open) ─────────────
-  const SessionBadge = sessionCode ? (
-    <div className="flex items-center gap-4 bg-slate-950 p-3 rounded-lg border border-slate-800">
-      <div className="text-3xl font-mono font-bold tracking-widest text-emerald-400">
-        {sessionCode}
+  const SessionBadge = sessionCode && qrUrl ? (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-4 bg-slate-950 p-3 rounded-lg border border-slate-800">
+        <div className="text-3xl font-mono font-bold tracking-widest text-emerald-400">
+          {sessionCode}
+        </div>
+        <div className="bg-white p-1 rounded">
+          <QRCodeSVG value={qrUrl} size={56} />
+        </div>
       </div>
-      <div className="bg-white p-1 rounded">
-        <QRCodeSVG value={`http://localhost:5173/?code=${sessionCode}`} size={56} />
-      </div>
+      <p className="text-xs text-slate-500 text-center font-mono">{qrUrl}</p>
     </div>
   ) : null;
 
@@ -244,6 +283,8 @@ export const SessionScreen: React.FC<SessionScreenProps> = ({ sessionCode, onSta
               </label>
               <label
                 htmlFor="slide-upload-input"
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
                 className={`flex flex-col items-center justify-center gap-2 w-full py-8 rounded-lg border-2 border-dashed cursor-pointer transition-colors ${
                   uploadState === 'uploading'
                     ? 'border-slate-600 bg-slate-950/30 pointer-events-none'

@@ -1,14 +1,14 @@
 import { useState } from 'react';
-import { joinSession, mockLogin } from '../services/api';
+import { joinSession, authLogin, type AuthLoginResponse } from '../services/api';
 
 type LoginProps = {
-  onSuccess: (code: string, token: string) => void;
+  onSuccess: (code: string, token: string, authToken?: string) => void;
 };
 
 export default function LoginScreen({ onSuccess }: LoginProps) {
   const [isCollegeAuth, setIsCollegeAuth] = useState(false);
   const [code, setCode] = useState('');
-  const [email, setEmail] = useState('');
+  const [collegeId, setCollegeId] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,12 +32,14 @@ export default function LoginScreen({ onSuccess }: LoginProps) {
     setIsLoading(true);
     setError(null);
     try {
-      await mockLogin(email, password);
-      // For now, college auth also needs to join a session, but we'll mock that it joins a default one
-      const token = await joinSession('CS101A');
-      onSuccess('CS101A', token);
+      const authRes: AuthLoginResponse = await authLogin(collegeId, password);
+      // Store JWT in localStorage for subsequent API calls (joinSession reads from here)
+      localStorage.setItem('auth_token', authRes.token);
+      // Join session - joinSession now picks up the auth_token from localStorage
+      const token = await joinSession(code);
+      onSuccess(code, token, authRes.token);
     } catch (err: any) {
-      setError('Login failed');
+      setError(err.message || 'Login failed');
     } finally {
       setIsLoading(false);
     }
@@ -94,16 +96,16 @@ export default function LoginScreen({ onSuccess }: LoginProps) {
         ) : (
           <form onSubmit={handleCollegeAuth} className="space-y-4">
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-teal-200 mb-1">
-                College Email
+              <label htmlFor="collegeId" className="block text-sm font-medium text-teal-200 mb-1">
+                College ID
               </label>
               <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                id="collegeId"
+                type="text"
+                value={collegeId}
+                onChange={(e) => setCollegeId(e.target.value)}
                 className="w-full px-4 py-2.5 bg-teal-900/50 border border-teal-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-white placeholder-teal-700"
-                placeholder="student@college.edu"
+                placeholder="e.g. student123"
                 disabled={isLoading}
               />
             </div>
@@ -124,7 +126,7 @@ export default function LoginScreen({ onSuccess }: LoginProps) {
             <div className="pt-2">
               <button
                 type="submit"
-                disabled={!email || !password || isLoading}
+                disabled={!collegeId || !password || isLoading}
                 className="w-full py-3 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-teal-800 disabled:text-teal-500 text-white font-medium rounded-xl transition-colors"
               >
                 {isLoading ? 'Signing in...' : 'Sign In'}
