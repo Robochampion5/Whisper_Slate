@@ -9,3 +9,9 @@
     @apply bg-slate-950 text-slate-200 antialiased;
   }
 }
+
+/* Prevent horizontal scroll on all viewports */
+html, body {
+  overflow-x: hidden;
+  width: 100%;
+}

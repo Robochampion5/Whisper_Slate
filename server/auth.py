@@ -8,6 +8,7 @@ Production would integrate with institutional SSO (OAuth2/SAML).
 import os
 import jwt
 import datetime
+import uuid
 from typing import Optional
 
 # JWT secret — in production this MUST be a strong random secret
@@ -37,11 +38,14 @@ def validate_college_login(college_id: str, password: str) -> bool:
 
 def create_jwt(user_id: int, college_id: str) -> str:
     """
-    Create a JWT token containing user_id and college_id.
+    Create a JWT token containing user_id, college_id, and a unique JTI (JWT ID).
+    The JTI is used for server-side revocation via logout.
     """
+    jti = str(uuid.uuid4())  # Unique token identifier for blacklist
     payload = {
         "user_id": user_id,
         "college_id": college_id,
+        "jti": jti,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=JWT_EXPIRY_HOURS),
         "iat": datetime.datetime.utcnow(),
     }

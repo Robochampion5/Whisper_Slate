@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { Mic, Lock } from 'lucide-react';
 import { startAudioCapture, stopAudioCapture } from '../services/audio';
+import ErrorBanner from './ErrorBanner';
 
 type CaptureProps = {
   onRecordingComplete: (audioBlob?: Blob) => void;
@@ -17,6 +18,7 @@ export default function CaptureScreen({
   onPenaltyResync: _onPenaltyResync,
 }: CaptureProps) {
   const [isRecording, setIsRecording] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
   // Guard ref to avoid firing both pointer and click handlers simultaneously
   const isHandlingRef = useRef(false);
 
@@ -26,11 +28,12 @@ export default function CaptureScreen({
 
   const startRecording = async () => {
     if (isRecording || isPenalised) return;
+    setMicError(null);
     try {
       await startAudioCapture();
       setIsRecording(true);
     } catch {
-      alert('Microphone access is required to use Whisper Slate.');
+      setMicError('Microphone access is required to use Whisper Slate. Please enable it in your browser settings.');
     }
   };
 
@@ -75,13 +78,20 @@ export default function CaptureScreen({
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-teal-950 px-6">
-      <div className="flex-1 flex flex-col items-center justify-center w-full">
+      <div className="flex-1 flex flex-col items-center justify-center w-full max-w-md">
         <div className="mb-16 text-center">
           <h2 className="text-xl font-medium text-teal-50 mb-2">Have a doubt?</h2>
           <p className="text-teal-300/70 text-sm">
             {isPenalised ? 'Recording paused' : 'Hold to whisper'}
           </p>
         </div>
+
+        {/* Mic error */}
+        {micError && (
+          <div className="w-full mb-6">
+            <ErrorBanner message={micError} onDismiss={() => setMicError(null)} />
+          </div>
+        )}
 
         {/* Hero Button */}
         <div className="relative flex flex-col items-center justify-center gap-6">

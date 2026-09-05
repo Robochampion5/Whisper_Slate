@@ -59,6 +59,28 @@ def get_db():
 
 
 # ---------------------------------------------------------------------------
+# JWT Blacklist for server-side logout (in-memory for MVP)
+# Maps token JTI (JWT ID) -> expiration timestamp
+# In production, use Redis or a database table with TTL
+# ---------------------------------------------------------------------------
+BLACKLISTED_TOKENS: Dict[str, datetime.datetime] = {}
+
+
+def cleanup_expired_tokens():
+    """Remove expired tokens from the blacklist (housekeeping)."""
+    now = datetime.datetime.utcnow()
+    expired = [jti for jti, exp in BLACKLISTED_TOKENS.items() if exp < now]
+    for jti in expired:
+        del BLACKLISTED_TOKENS[jti]
+
+
+def is_token_blacklisted(jti: str) -> bool:
+    """Check if a token has been revoked via logout."""
+    cleanup_expired_tokens()
+    return jti in BLACKLISTED_TOKENS
+
+
+# ---------------------------------------------------------------------------
 # Rate limiting (in-memory token bucket for MVP)
 # Maps device_token -> { 'count': int, 'reset_time': datetime }
 # ---------------------------------------------------------------------------
@@ -408,12 +430,21 @@ def auth_login(req: AuthLoginRequest, db: Session = Depends(get_db)):
     MVP: Validate college credentials against mock store.
     Production: Replace with OAuth2/SAML institutional SSO.
     Returns JWT on success.
+
+    Security: Uses constant-time user lookup to prevent timing attacks
+    that could reveal whether a college ID exists in the database.
     """
-    if not auth.validate_college_login(req.college_id, req.password):
+    # Always check credentials first (constant time regardless of user existence)
+    credentials_valid = auth.validate_college_login(req.college_id, req.password)
+
+    # Always query the database (even if credentials are invalid) to maintain constant timing
+    user = db.query(models.User).filter(models.User.college_id == req.college_id).first()
+
+    # Now check credentials - this happens after the DB query so timing is consistent
+    if not credentials_valid:
         raise HTTPException(status_code=401, detail="Invalid college credentials")
 
-    # Find or create user
-    user = db.query(models.User).filter(models.User.college_id == req.college_id).first()
+    # Create user if doesn't exist (only reached if credentials are valid)
     if not user:
         user = models.User(college_id=req.college_id, email=f"{req.college_id}@college.edu")
         db.add(user)
@@ -435,13 +466,40 @@ def auth_login(req: AuthLoginRequest, db: Session = Depends(get_db)):
     return {"token": token, "user_id": user.id, "college_id": user.college_id}
 
 
+@app.post("/auth/logout")
+def auth_logout(
+    authorization: str = Header(None, alias="Authorization"),
+):
+    """
+    Logout: blacklist the current JWT token server-side.
+    The token becomes invalid immediately, even before its expiration.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+    token = authorization[7:]
+    payload = auth.decode_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Add token to blacklist with its expiration time
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if jti and exp:
+        exp_datetime = datetime.datetime.fromtimestamp(exp, tz=datetime.timezone.utc)
+        BLACKLISTED_TOKENS[jti] = exp_datetime
+        logger.info("Token revoked via logout: jti=%s, exp=%s", jti, exp_datetime.isoformat())
+
+    return {"message": "Logged out successfully"}
+
+
 def get_current_user(
     authorization: str = Header(None, alias="Authorization"),
     db: Session = Depends(get_db),
 ) -> models.User:
     """
     FastAPI dependency to extract and validate JWT, returning the User.
-    Raises 401 if token is missing/invalid/expired.
+    Raises 401 if token is missing/invalid/expired/blacklisted.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -450,6 +508,11 @@ def get_current_user(
     payload = auth.decode_jwt(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Check if token has been revoked via logout
+    jti = payload.get("jti")
+    if jti and is_token_blacklisted(jti):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
 
     user = db.query(models.User).filter(models.User.id == payload["user_id"]).first()
     if not user:
@@ -476,6 +539,11 @@ def join_session(
     payload = auth.decode_jwt(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Check if token has been revoked via logout
+    jti = payload.get("jti")
+    if jti and is_token_blacklisted(jti):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
 
     user = db.query(models.User).filter(models.User.id == payload["user_id"]).first()
     if not user:

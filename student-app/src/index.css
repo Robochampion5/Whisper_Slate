@@ -10,6 +10,12 @@
   color: rgba(255, 255, 255, 0.87);
 }
 
+/* Prevent horizontal scroll on all viewports */
+html, body {
+  overflow-x: hidden;
+  width: 100%;
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;

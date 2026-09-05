@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  CheckCircle2, XCircle, ChevronDown, ChevronUp,
+  CheckCircle2, XCircle,
   AlertTriangle, Target, Clock, MessageSquare, ShieldAlert
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';

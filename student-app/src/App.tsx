@@ -6,6 +6,7 @@ import PreviewScreen from './components/PreviewScreen'
 import UploadingScreen from './components/UploadingScreen'
 import AwaitingReviewScreen, { type ReviewDecision } from './components/AwaitingReviewScreen'
 import OutcomeScreen from './components/ConfirmationScreen'
+import Toast, { type ToastType } from './components/Toast'
 import { getMyDoubts } from './services/api'
 import { StudentWs } from './services/studentWs'
 import type { StudentWsMessage } from './services/studentWs'
@@ -41,6 +42,9 @@ function App() {
 
   // Set when the teacher makes a decision
   const [reviewDecision, setReviewDecision] = useState<ReviewDecision | null>(null)
+
+  // Toast notification state
+  const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null)
 
   // Penalty countdown — managed here so CaptureScreen can disable the mic.
   // Derived from penaltyExpiresAt (wall-clock) for accuracy; decremented locally
@@ -197,6 +201,8 @@ function App() {
     }
     connectStudentWs(token)
     setAppState('CAPTURE')
+    // Show success toast
+    setToast({ message: 'Connected to classroom successfully!', type: 'success' })
   }
 
   const handleRecordingComplete = (blob?: Blob) => {
@@ -222,7 +228,7 @@ function App() {
       return
     }
     console.error('Upload error:', err)
-    alert('Failed to send your doubt: ' + err)
+    setToast({ message: `Failed to send your doubt: ${err}`, type: 'error' })
     setAppState('CAPTURE')
   }, [resyncPenalty])
 
@@ -265,6 +271,7 @@ function App() {
   return (
     <main className="relative min-h-screen bg-teal-950 selection:bg-emerald-500/30 text-teal-50">
       {appState !== 'LOGIN' && <ConnectionBadge />}
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
       {appState === 'LOGIN' && (
         <LoginScreen onSuccess={handleLoginSuccess} />

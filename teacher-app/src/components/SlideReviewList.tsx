@@ -1,5 +1,5 @@
 import React, { useCallback } from 'react';
-import { FileText, Sparkles, Image } from 'lucide-react';
+import { Sparkles, Image } from 'lucide-react';
 import type { SlideChunk } from '../services/api';
 
 interface SlideReviewListProps {
