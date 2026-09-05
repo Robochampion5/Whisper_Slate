@@ -21,11 +21,15 @@ This is a monorepo with three parts:
   - **Awaiting review** — doubt is in the teacher's moderation queue.
   - **Accepted** — shown with any teacher reply; app returns to capture.
   - **Rejected** — shown with reason and, if a penalty was applied, a live countdown during which recording is disabled.
+- **UX improvements**: Toast notifications for success/error feedback, inline error displays instead of browser alerts, 404 error page, mobile-optimized with no horizontal scroll.
+- **SEO-ready**: Proper page title ("Whisper Slate"), meta description, and custom favicon (speech bubble with sound waves).
 - No AI model runs in the browser. No model download on first load.
 
 ### `/server` — Python + FastAPI
 
 - `POST /doubts/audio` — accepts raw audio upload; returns `doubtId` immediately; schedules a `BackgroundTask` for AI processing.
+- `POST /auth/login` — validates college credentials, returns JWT token with unique JTI for server-side revocation.
+- `POST /auth/logout` — blacklists JWT token server-side, invalidating it immediately.
 - **AI pipeline** (loaded once at server startup, runs fully locally):
   - [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) (`base`, CPU, int8) — speech-to-text.
   - [`sentence-transformers`](https://www.sbert.net/) (`all-MiniLM-L6-v2`) — 384-dim semantic embedding.
@@ -33,6 +37,7 @@ This is a monorepo with three parts:
 - Transcript + embedding feed into `AgglomerativeClustering` (scikit-learn) for the teacher dashboard.
 - Teacher moderation: doubts land in a `pending_review` queue; teacher accepts or rejects (with optional reply + penalty). Only **accepted** doubts appear in the cluster ranking.
 - WebSockets: `/ws/dashboard` broadcasts cluster updates to the teacher app; `/ws/device/{doubtId}` pushes the review decision to the specific student.
+- **Security**: Timing-attack-resistant login, JWT blacklist for logout, no hardcoded secrets in client apps.
 
 ### `/teacher-app` — React + Vite + TypeScript
 
@@ -40,6 +45,7 @@ This is a monorepo with three parts:
 - Spike timeline showing when confusion peaked during the lecture.
 - Moderation queue: accept / reject each doubt with optional reply and penalty.
 - Connected-devices panel with kick/block controls.
+- **Production-ready**: Proper page title ("Whisper Slate – Teacher"), meta description, custom favicon (dashboard grid with checkmark), 404 error page.
 
 ---
 
@@ -52,6 +58,9 @@ This is a monorepo with three parts:
 | **Anonymous to classmates** | Teacher dashboard shows only aggregated, anonymous clusters — never a name or individual transcript tied to a person. |
 | **Local network only** | FastAPI server binds to the classroom LAN; no WAN exposure required. |
 | **Traceable to moderators only** | Doubts are stored against a hashed device token for moderation, never a real identity visible in any UI. |
+| **JWT revocation on logout** | Server-side token blacklist prevents compromised tokens from being used after logout. |
+| **Timing-attack resistant login** | Constant-time credential validation prevents attackers from discerning user existence. |
+| **No hardcoded secrets in browser** | All sensitive keys (`JWT_SECRET`, `OPENAI_API_KEY`, auth credentials) stay server-side. |
 
 ---
 
@@ -118,13 +127,17 @@ The deployment guide covers:
 |---|---|
 | **Transcript Preview** | Students can view and edit the AI-transcribed text before sending (§9.1) |
 | **College Login / JWT Auth** | Mock college ID + password authentication with JWT tokens (§7, §8) |
+| **Secure Logout** | Server-side JWT blacklist revokes tokens immediately on logout |
 | **Escalating Bans** | Penalty durations escalate: 5min → 1d → 3d → 7d → 30d (§7) |
 | **Identity Traceability** | Doubts linked to `user_id` server-side; dashboard stays anonymous |
 | **Dynamic QR Code** | Auto-detects LAN IP via WebRTC — works on any network |
-| **PWA Support** | Installable on student phones, offline-capable shell |
+| **PWA Support** | Installable on student phones, offline-capable shell with custom icons |
 | **Drag-and-Drop Slides** | Teacher uploads PDF/PPTX for topic context extraction |
 | **Rate-Limit Feedback** | Student sees countdown timer when hitting 5 doubts/min limit |
 | **Device Block/Kick** | Teacher can block or kick devices from dashboard panel |
+| **Toast Notifications** | Non-intrusive success/error feedback replacing browser alerts |
+| **404 Error Pages** | Friendly error handling with navigation options in both apps |
+| **Mobile Optimized** | Prevents horizontal scroll, proper viewport handling, touch-friendly UI |
 
 ---
 
@@ -159,9 +172,9 @@ Each app has a `.env.example` file — copy to `.env` and fill in:
 ```
 whisper-slate/
 ├── server/                 # FastAPI server
-│   ├── main.py            # All endpoints, WebSockets, AI pipeline
+│   ├── main.py            # All endpoints, WebSockets, AI pipeline, JWT blacklist
 │   ├── models.py          # SQLAlchemy models (User, Device, Doubt, Penalty, SlideChunk)
-│   ├── auth.py            # JWT utilities, ban escalation logic
+│   ├── auth.py            # JWT utilities (with JTI for revocation), ban escalation logic
 │   ├── clustering.py      # Agglomerative clustering + spike detection
 │   ├── ai_pipeline.py     # faster-whisper + sentence-transformers
 │   ├── slide_extractor.py # PDF/PPTX text + OCR extraction
@@ -172,14 +185,19 @@ whisper-slate/
 │   ├── src/
 │   │   ├── App.tsx        # State machine: LOGIN→CAPTURE→PREVIEW→UPLOADING→AWAITING_REVIEW→OUTCOME
 │   │   ├── components/    # LoginScreen, CaptureScreen, PreviewScreen, UploadingScreen, AwaitingReviewScreen, OutcomeScreen
+│   │   │   ├── Toast.tsx           # Success/error notifications
+│   │   │   ├── ErrorBanner.tsx     # Inline error display
+│   │   │   └── NotFoundPage.tsx    # 404 fallback page
 │   │   └── services/      # api.ts (REST), studentWs.ts (WebSocket)
-│   ├── public/            # PWA icons (icon-192.svg, icon-512.svg)
+│   ├── public/            # PWA icons (icon-192.svg, icon-512.svg), custom favicon
 │   ├── vite.config.ts     # PWA manifest config
 │   └── .env.example
 ├── teacher-app/           # Teacher dashboard
 │   ├── src/
 │   │   ├── components/    # Dashboard, SessionScreen, DevicePanel, ModerationQueue, ClusterCard, GlobalTimeline
+│   │   │   └── NotFoundPage.tsx    # 404 fallback page
 │   │   └── utils/         # getLanIp.ts (WebRTC LAN IP detection)
+│   ├── public/            # Custom favicon
 │   └── .env.example
 └── docs/
     └── deployment.md      # Production deployment guide
